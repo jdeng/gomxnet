@@ -1,4 +1,4 @@
-import os.path, re
+import os.path, re, StringIO
 
 blacklist = [
 'Windows.h', 'cublas_v2.h', 'cuda/tensor_gpu-inl.cuh', 'cuda_runtime.h', 'cudnn.h', 'cudnn_lrn-inl.h', 'curand.h', 'glog/logging.h', 'io/azure_filesys.h', 'io/hdfs_filesys.h', 'io/s3_filesys.h', 'kvstore_dist.h', 'mach/clock.h', 'mach/mach.h', 'malloc.h', 'mkl.h', 'mkl_cblas.h', 'mkl_vsl.h', 'mkl_vsl_functions.h', 'nvml.h', 'opencv2/opencv.hpp', 'sys/stat.h', 'sys/types.h'
@@ -35,18 +35,7 @@ re2 = re.compile('"([./a-zA-Z0-9_-]*)"')
 sysheaders = []
 history = {}
 
-out = open('mxnet-all.cc', 'wb')
-print >>out, '''#include "mxnet-all.hh"
-
-#if defined(__MACH__)
-#include <mach/clock.h>
-#include <mach/mach.h>
-
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
-'''
-
+out = StringIO.StringIO()
 def expand(x, pending):
 	if x in history and x not in ['mshadow/mshadow/expr_scalar-inl.h']: # MULTIPLE includes
 		return
@@ -79,9 +68,22 @@ def expand(x, pending):
 
 expand('mxnet.cc', [])
 
-inc = open('mxnet-all.hh', 'wb')
+f = open('mxnet-all.cc', 'wb')
+print >>f, '''
+#if defined(__MACH__)
+#include <mach/clock.h>
+#include <mach/mach.h>
+
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+'''
+
 for k in sorted(sysheaders):
-	print >> inc, "#include <%s>" % k
+	print >>f, "#include <%s>" % k
+
+print >>f, ''
+print >>f, out.getvalue()
 
 for x in sources:
 	if x not in history: print 'Not processed:', x

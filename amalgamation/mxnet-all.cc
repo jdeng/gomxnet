@@ -1,4 +1,3 @@
-#include "mxnet-all.hh"
 
 #if defined(__MACH__)
 #include <mach/clock.h>
@@ -8,9 +7,58 @@
 #include <sys/types.h>
 #endif
 
+#include <algorithm>
+#include <array>
+#include <assert.h>
+#include <atomic>
+#include <bitset>
+#include <cassert>
+#include <cblas.h>
+#include <cctype>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <deque>
+#include <dirent.h>
+#include <emmintrin.h>
+#include <errno.h>
+#include <functional>
+#include <inttypes.h>
+#include <iostream>
+#include <istream>
+#include <limits>
+#include <list>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <queue>
+#include <random>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <stdlib.h>
+#include <streambuf>
+#include <string>
+#include <thread>
+#include <time.h>
+#include <type_traits>
+#include <typeinfo>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 //===== EXPANDIND: mxnet.cc =====
 
-// g++ -std=c++11 -Wall -mshadow/ -Isrc/dmlc-core/include -Iinclude  -I/usr/local//Cellar/openblas/0.2.14_1/include -o m  src/mxnet.cc  -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+// mexnet.cc
 
 #define MSHADOW_FORCE_STREAM
 #define MSHADOW_USE_CUDA 	0
@@ -31449,4 +31497,5 @@ bool RecordIOChunkReader::NextRecord(InputSplit::Blob *out_rec) {
 
 
 //===== EXPANDED: mxnet.cc =====
+
 

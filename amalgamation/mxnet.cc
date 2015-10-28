@@ -1,4 +1,4 @@
-// g++ -std=c++11 -Wall -mshadow/ -Isrc/dmlc-core/include -Iinclude  -I/usr/local//Cellar/openblas/0.2.14_1/include -o m  src/mxnet.cc  -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+// mexnet.cc
 
 #define MSHADOW_FORCE_STREAM
 #define MSHADOW_USE_CUDA 	0
