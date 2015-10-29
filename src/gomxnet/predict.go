@@ -1,12 +1,18 @@
 package gomxnet
 
-//#cgo LDFLAGS: ../../amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+//#cgo LDFLAGS: /Users/jack/Work/gomxnet/amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
 //#include <stdlib.h>
 //#include "../../amalgamation/c_predict_api.h"
 import "C"
 import "unsafe"
 
 import "fmt"
+
+const (
+	CPU = iota + 1
+	GPU
+	CPU_PINNED
+)
 
 type Predictor struct {
 	handle C.PredictorHandle
@@ -42,8 +48,10 @@ func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, n
 }
 
 func (p *Predictor) Free() {
-	C.MXPredFree(p.handle)
-	p.handle = nil
+	if p.handle != nil {
+		C.MXPredFree(p.handle)
+		p.handle = nil
+	}
 }
 
 func (p *Predictor) Forward(key string, data []float32) error {
