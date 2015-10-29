@@ -43,15 +43,16 @@ import "C"
   params, _ := ioutil.ReadFile("../Inception-0009.params")
   
   // create predictor with model, device and input node config
-  pred, _ := gomxnet.NewPredictor(gomxnet.Model{symbol, params}, gomxnet.Device{gomxnet.CPU, 0}, []gomxnet.InputNode{{"data", []uint32{1, 3, 224, 224}}})
+  batch := 1
+  pred, _ := gomxnet.NewPredictor(gomxnet.Model{symbol, params}, gomxnet.Device{gomxnet.CPU, 0}, []gomxnet.InputNode{{"data", []uint32{batch, 3, 224, 224}}})
 
-  // get input vector from image (should be 224x224)
-  input, _ := gomxnet.InputFrom(img, 117.0, 117.0, 117.0)
+  // get input vector from 224 * 224 image(s)
+  input, _ := gomxnet.InputFrom([]image.Image{img}, gomxnet.ImageMean{117.0, 117.0, 117.0})
   
   // feed forward
   pred.Forward("data", input)
   
-  // get the first output node
+  // get the first output node. length for each image is len(output) / batch
   output, _ := pred.GetOutput(0)
   
   // free the predictor
