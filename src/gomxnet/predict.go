@@ -15,22 +15,22 @@ const (
 )
 
 type Predictor struct {
-	handle C.PredictorHandle
+	handle     C.PredictorHandle
 	outputSize uint32
 }
 
 type Model struct {
-	Symbol []byte 	// json
-	Params []byte	// network
+	Symbol []byte // json
+	Params []byte // network
 }
 
 type Device struct {
 	Type int
-	Id int
+	Id   int
 }
 
 type InputNode struct {
-	Key string
+	Key   string
 	Shape []uint32
 }
 
