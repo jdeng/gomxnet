@@ -16,24 +16,44 @@ const (
 
 type Predictor struct {
 	handle C.PredictorHandle
+	outputSize uint32
 }
 
-func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, numInputNodes uint32, inputKeys []string, inputShapeInd []uint32, inputShapeData []uint32) (*Predictor, error) {
-	var b *C.char
-	ptrSize := unsafe.Sizeof(b)
-	ik := C.malloc(C.size_t(len(inputKeys)) * C.size_t(ptrSize))
-	defer C.free(unsafe.Pointer(ik))
+type Model struct {
+	Symbol []byte 	// json
+	Params []byte	// network
+}
 
-	for i := 0; i < len(inputKeys); i++ {
-		element := (**C.char)(unsafe.Pointer(uintptr(ik) + uintptr(i)*ptrSize))
-		*element = C.CString(inputKeys[i])
+type Device struct {
+	Type int
+	Id int
+}
+
+type InputNode struct {
+	Key string
+	Shape []uint32
+}
+
+func NewPredictor(model Model, dev Device, input []InputNode) (*Predictor, error) {
+	shapeInd := []uint32{0}
+	shapeData := []uint32{}
+
+	var b *C.char
+	keys := C.malloc(C.size_t(len(input)) * C.size_t(unsafe.Sizeof(b)))
+	defer C.free(unsafe.Pointer(keys))
+
+	for i := 0; i < len(input); i++ {
+		element := (**C.char)(unsafe.Pointer(uintptr(keys) + uintptr(i)*unsafe.Sizeof(b)))
+		*element = C.CString(input[i].Key)
+		shapeInd = append(shapeInd, uint32(len(input[i].Shape)))
+		shapeData = append(shapeData, input[i].Shape...)
 	}
 
 	var handle C.PredictorHandle
-	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&symbolFile[0])), (*C.char)(unsafe.Pointer(&paramFile[0])), C.size_t(len(paramFile)), C.int(devType), C.int(devId), C.mx_uint(numInputNodes), (**C.char)(ik), (*C.mx_uint)(&inputShapeInd[0]), (*C.mx_uint)(&inputShapeData[0]), &handle)
+	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&model.Symbol[0])), (*C.char)(unsafe.Pointer(&model.Params[0])), C.size_t(len(model.Params)), C.int(dev.Type), C.int(dev.Id), C.mx_uint(len(input)), (**C.char)(keys), (*C.mx_uint)(&shapeInd[0]), (*C.mx_uint)(&shapeData[0]), &handle)
 
-	for i := 0; i < len(inputKeys); i++ {
-		element := (**C.char)(unsafe.Pointer(uintptr(ik) + uintptr(i)*ptrSize))
+	for i := 0; i < len(input); i++ {
+		element := (**C.char)(unsafe.Pointer(uintptr(keys) + uintptr(i)*unsafe.Sizeof(b)))
 		C.free(unsafe.Pointer(*element))
 	}
 
@@ -43,7 +63,7 @@ func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, n
 		return nil, GetLastError()
 	}
 
-	return &Predictor{handle}, nil
+	return &Predictor{handle, 0}, nil
 }
 
 func (p *Predictor) Free() {
@@ -73,21 +93,27 @@ func (p *Predictor) Forward(key string, data []float32) error {
 }
 
 func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
-	var shapeData *C.mx_uint
-	var shapeDim C.mx_uint
-	if n, err := C.MXPredGetOutputShape(p.handle, C.mx_uint(index), (**C.mx_uint)(&shapeData), (*C.mx_uint)(&shapeDim)); err != nil {
-		return nil, err
-	} else if n < 0 {
-		return nil, GetLastError()
+	if p.outputSize == 0 {
+		var shapeData *C.mx_uint
+		var shapeDim C.mx_uint
+		if n, err := C.MXPredGetOutputShape(p.handle, C.mx_uint(index), (**C.mx_uint)(&shapeData), (*C.mx_uint)(&shapeDim)); err != nil {
+			return nil, err
+		} else if n < 0 {
+			return nil, GetLastError()
+		}
+
+		var size uint32 = 1
+		for i := 0; i < int(shapeDim); i++ {
+			n := *(*C.mx_uint)(unsafe.Pointer(uintptr(unsafe.Pointer(shapeData)) + uintptr(i)*unsafe.Sizeof(size)))
+			size *= uint32(n)
+		}
+
+		p.outputSize = size
 	}
 
-	var size C.mx_uint = 1
-	for i := 0; i < int(shapeDim); i++ {
-		n := *(*C.mx_uint)(unsafe.Pointer(uintptr(unsafe.Pointer(shapeData)) + uintptr(i)*unsafe.Sizeof(size)))
-		size *= n
-	}
+	size := p.outputSize
 	data := make([]C.mx_float, size)
-	if n, err := C.MXPredGetOutput(p.handle, C.mx_uint(index), (*C.mx_float)(&data[0]), size); err != nil {
+	if n, err := C.MXPredGetOutput(p.handle, C.mx_uint(index), (*C.mx_float)(&data[0]), C.mx_uint(size)); err != nil {
 		return nil, err
 	} else if n < 0 {
 		return nil, GetLastError()

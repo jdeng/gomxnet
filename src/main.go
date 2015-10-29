@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
-	"image/jpeg"
+//	"image/jpeg"
 	"io/ioutil"
 	"os"
 
@@ -29,10 +29,10 @@ func main() {
 	img, _, _ := image.Decode(reader)
 	img = imaging.Fill(img, 224, 224, imaging.Center, imaging.Lanczos)
 
+/*
 	test, _ := os.OpenFile("test.jpg", os.O_CREATE|os.O_WRONLY, 0644)
 	jpeg.Encode(test, img, nil)
-
-	input, _ := gomxnet.InputFrom(img, 117.0, 117.0, 117.0)
+*/
 
 	symbol, err := ioutil.ReadFile("../Inception-symbol.json")
 	if err != nil {
@@ -42,28 +42,26 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	pred, err := gomxnet.NewPredictor(symbol, params, gomxnet.CPU, 0, 1, []string{"data"}, []uint32{0, 4}, []uint32{1, 3, 224, 224})
-	if err != nil {
-		panic(err)
-	}
-
-	pred.Forward("data", input)
-	output, _ := pred.GetOutput(0)
-	pred.Free()
-	pred = nil
-
-	index := make([]int, len(output))
-	gomxnet.Argsort(output, index)
-
 	synset, err := os.Open("../synset.txt")
 	if err != nil {
 		panic(err)
 	}
 
-	scanner := bufio.NewScanner(synset)
+	pred, err := gomxnet.NewPredictor(gomxnet.Model{symbol, params}, gomxnet.Device{gomxnet.CPU, 0}, []gomxnet.InputNode{{"data", []uint32{1, 3, 224, 224}}})
+	if err != nil {
+		panic(err)
+	}
+
+	input, _ := gomxnet.InputFrom(img, 117.0, 117.0, 117.0)
+	pred.Forward("data", input)
+	output, _ := pred.GetOutput(0)
+	pred.Free()
+
+	index := make([]int, len(output))
+	gomxnet.Argsort(output, index)
 
 	dict := []string{}
+	scanner := bufio.NewScanner(synset)
 	for scanner.Scan() {
 		dict = append(dict, scanner.Text())
 	}
