@@ -2,9 +2,16 @@
 #if defined(__MACH__)
 #include <mach/clock.h>
 #include <mach/mach.h>
+#endif
 
+#if !defined(__WIN32__)
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#if !defined(__ANDROID__)
+#include <emmintrin.h>
+#endif
+
 #endif
 
 #include <algorithm>
@@ -27,7 +34,6 @@
 #include <ctime>
 #include <deque>
 #include <dirent.h>
-#include <emmintrin.h>
 #include <errno.h>
 #include <functional>
 #include <inttypes.h>

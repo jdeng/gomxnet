@@ -1,7 +1,7 @@
 import os.path, re, StringIO
 
 blacklist = [
-'Windows.h', 'cublas_v2.h', 'cuda/tensor_gpu-inl.cuh', 'cuda_runtime.h', 'cudnn.h', 'cudnn_lrn-inl.h', 'curand.h', 'glog/logging.h', 'io/azure_filesys.h', 'io/hdfs_filesys.h', 'io/s3_filesys.h', 'kvstore_dist.h', 'mach/clock.h', 'mach/mach.h', 'malloc.h', 'mkl.h', 'mkl_cblas.h', 'mkl_vsl.h', 'mkl_vsl_functions.h', 'nvml.h', 'opencv2/opencv.hpp', 'sys/stat.h', 'sys/types.h'
+'Windows.h', 'cublas_v2.h', 'cuda/tensor_gpu-inl.cuh', 'cuda_runtime.h', 'cudnn.h', 'cudnn_lrn-inl.h', 'curand.h', 'glog/logging.h', 'io/azure_filesys.h', 'io/hdfs_filesys.h', 'io/s3_filesys.h', 'kvstore_dist.h', 'mach/clock.h', 'mach/mach.h', 'malloc.h', 'mkl.h', 'mkl_cblas.h', 'mkl_vsl.h', 'mkl_vsl_functions.h', 'nvml.h', 'opencv2/opencv.hpp', 'sys/stat.h', 'sys/types.h', 'emmintrin.h'
 ]
 
 sources = []
@@ -73,9 +73,16 @@ print >>f, '''
 #if defined(__MACH__)
 #include <mach/clock.h>
 #include <mach/mach.h>
+#endif
 
+#if !defined(__WIN32__)
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#if !defined(__ANDROID__)
+#include <emmintrin.h>
+#endif
+
 #endif
 '''
 
