@@ -54,6 +54,6 @@ func main() {
 		dict = append(dict, scanner.Text())
 	}
 	for i := 0; i < 50; i++ {
-		fmt.Printf("%d: %d, %s, %f\n", i, index[i], dict[index[i]], output[index[i]])
+		fmt.Printf("%d: %f, %d, %s\n", i, output[i], index[i], dict[index[i]])
 	}
 }
