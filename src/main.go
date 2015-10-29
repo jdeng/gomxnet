@@ -3,8 +3,10 @@ package main
 import (
 	"./gomxnet"
 	"bufio"
+	"flag"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"io/ioutil"
 	"os"
 
@@ -12,7 +14,13 @@ import (
 )
 
 func main() {
+	flag.Parse()
+	args := flag.Args()
 	file := "cat15.jpg"
+	if len(args) >= 1 {
+		file = args[0]
+	}
+
 	reader, err := os.Open(file)
 	if err != nil {
 		panic(err)
@@ -20,6 +28,10 @@ func main() {
 
 	img, _, _ := image.Decode(reader)
 	img = imaging.Fill(img, 224, 224, imaging.Center, imaging.Lanczos)
+
+	test, _ := os.OpenFile("test.jpg", os.O_CREATE|os.O_WRONLY, 0644)
+	jpeg.Encode(test, img, nil)
+
 	input, _ := gomxnet.InputFrom(img, 117.0, 117.0, 117.0)
 
 	symbol, err := ioutil.ReadFile("../Inception-symbol.json")
@@ -38,6 +50,8 @@ func main() {
 
 	pred.Forward("data", input)
 	output, _ := pred.GetOutput(0)
+	pred.Free()
+	pred = nil
 
 	index := make([]int, len(output))
 	gomxnet.Argsort(output, index)
@@ -53,7 +67,7 @@ func main() {
 	for scanner.Scan() {
 		dict = append(dict, scanner.Text())
 	}
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 20; i++ {
 		fmt.Printf("%d: %f, %d, %s\n", i, output[i], index[i], dict[index[i]])
 	}
 }
