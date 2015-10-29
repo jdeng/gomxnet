@@ -39,9 +39,8 @@ func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, n
 
 	if err != nil {
 		return nil, err
-	}
-	if n < 0 {
-		return nil, fmt.Errorf("Failed to create predictor")
+	} else if n < 0 {
+		return nil, GetLastError()
 	}
 
 	return &Predictor{handle}, nil
@@ -61,14 +60,14 @@ func (p *Predictor) Forward(key string, data []float32) error {
 		if n, err := C.MXPredSetInput(p.handle, k, (*C.mx_float)(&data[0]), C.mx_uint(len(data))); err != nil {
 			return err
 		} else if n < 0 {
-			return fmt.Errorf("Failed to set input")
+			return GetLastError()
 		}
 	}
 
 	if n, err := C.MXPredForward(p.handle); err != nil {
 		return err
 	} else if n < 0 {
-		return fmt.Errorf("Failed to forward: %d", n)
+		return GetLastError()
 	}
 	return nil
 }
@@ -79,7 +78,7 @@ func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
 	if n, err := C.MXPredGetOutputShape(p.handle, C.mx_uint(index), (**C.mx_uint)(&shapeData), (*C.mx_uint)(&shapeDim)); err != nil {
 		return nil, err
 	} else if n < 0 {
-		return nil, fmt.Errorf("Failed to get output shape: %d", n)
+		return nil, GetLastError()
 	}
 
 	var size C.mx_uint = 1
@@ -91,7 +90,7 @@ func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
 	if n, err := C.MXPredGetOutput(p.handle, C.mx_uint(index), (*C.mx_float)(&data[0]), size); err != nil {
 		return nil, err
 	} else if n < 0 {
-		return nil, fmt.Errorf("Failed to get output: %d", n)
+		return nil, GetLastError()
 	}
 	out := make([]float32, size)
 	for i := 0; i < int(size); i++ {
