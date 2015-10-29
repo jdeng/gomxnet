@@ -7,6 +7,7 @@ import "C"
 import "unsafe"
 
 import "fmt"
+
 type Predictor struct {
 	handle C.PredictorHandle
 }
@@ -15,23 +16,26 @@ func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, n
 	var b *C.char
 	ptrSize := unsafe.Sizeof(b)
 	ik := C.malloc(C.size_t(len(inputKeys)) * C.size_t(ptrSize))
-	for i:=0; i<len(inputKeys); i++ {
+	defer C.free(unsafe.Pointer(ik))
+
+	for i := 0; i < len(inputKeys); i++ {
 		element := (**C.char)(unsafe.Pointer(uintptr(ik) + uintptr(i)*ptrSize))
 		*element = C.CString(inputKeys[i])
 	}
 
 	var handle C.PredictorHandle
-	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&symbolFile[0])), (*C.char)(unsafe.Pointer(&paramFile[0])), C.size_t(len(paramFile)), C.int(devType), C.int(devId), C.mx_uint(numInputNodes), (**C.char)(ik) , (*C.mx_uint)(&inputShapeInd[0]) , (*C.mx_uint)(&inputShapeData[0]), &handle)
+	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&symbolFile[0])), (*C.char)(unsafe.Pointer(&paramFile[0])), C.size_t(len(paramFile)), C.int(devType), C.int(devId), C.mx_uint(numInputNodes), (**C.char)(ik), (*C.mx_uint)(&inputShapeInd[0]), (*C.mx_uint)(&inputShapeData[0]), &handle)
 
-	for i:=0; i<len(inputKeys); i++ {
+	for i := 0; i < len(inputKeys); i++ {
 		element := (**C.char)(unsafe.Pointer(uintptr(ik) + uintptr(i)*ptrSize))
 		C.free(unsafe.Pointer(*element))
 	}
-	C.free(unsafe.Pointer(ik))
-	
-	if err != nil { return nil, err }
+
+	if err != nil {
+		return nil, err
+	}
 	if n < 0 {
-		return nil, fmt.Errorf("Failed to create predictor") 
+		return nil, fmt.Errorf("Failed to create predictor")
 	}
 
 	return &Predictor{handle}, nil
@@ -44,12 +48,12 @@ func (p *Predictor) Free() {
 
 func (p *Predictor) Forward(key string, data []float32) error {
 	if data != nil {
-		k := C.CString(key)	
+		k := C.CString(key)
 		defer C.free(unsafe.Pointer(k))
 		if n, err := C.MXPredSetInput(p.handle, k, (*C.mx_float)(&data[0]), C.mx_uint(len(data))); err != nil {
 			return err
 		} else if n < 0 {
-			return fmt.Errorf("Failed to set input") 
+			return fmt.Errorf("Failed to set input")
 		}
 	}
 
@@ -72,7 +76,7 @@ func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
 
 	var size C.mx_uint = 1
 	for i := 0; i < int(shapeDim); i++ {
-		n := *(*C.mx_uint)(unsafe.Pointer( uintptr(unsafe.Pointer(shapeData)) + uintptr(i) * unsafe.Sizeof(size)))
+		n := *(*C.mx_uint)(unsafe.Pointer(uintptr(unsafe.Pointer(shapeData)) + uintptr(i)*unsafe.Sizeof(size)))
 		size *= n
 	}
 	data := make([]C.mx_float, size)
@@ -82,7 +86,7 @@ func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
 		return nil, fmt.Errorf("Failed to get output: %d", n)
 	}
 	out := make([]float32, size)
-	for i:=0; i<int(size); i++ {
+	for i := 0; i < int(size); i++ {
 		out[i] = float32(data[i])
 	}
 	return out, nil
