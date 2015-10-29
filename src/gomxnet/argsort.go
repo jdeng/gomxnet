@@ -17,7 +17,7 @@ func (a argsort) Len() int {
 }
 
 func (a argsort) Less(i, j int) bool {
-	return a.s[i] < a.s[j]
+	return a.s[i] > a.s[j]
 }
 
 func (a argsort) Swap(i, j int) {
