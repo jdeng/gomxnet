@@ -21,7 +21,7 @@ func NewPredictor(symbolFile []byte, paramFile []byte, devType int, devId int, n
 	}
 
 	var handle C.PredictorHandle
-	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&symbolFile[0])), (*C.char)(unsafe.Pointer(&paramFile[0])), C.size_t(len(paramFile)), C.int(devType), C.int(devId), C.mx_uint(numInputNodes), (**C.char)(ik) , (*C.mx_uint)(&inputShapeInd[0]) , (*C.mx_uint)(&inputShapeData[0]) , &handle)
+	n, err := C.MXPredCreate((*C.char)(unsafe.Pointer(&symbolFile[0])), (*C.char)(unsafe.Pointer(&paramFile[0])), C.size_t(len(paramFile)), C.int(devType), C.int(devId), C.mx_uint(numInputNodes), (**C.char)(ik) , (*C.mx_uint)(&inputShapeInd[0]) , (*C.mx_uint)(&inputShapeData[0]), &handle)
 
 	for i:=0; i<len(inputKeys); i++ {
 		element := (**C.char)(unsafe.Pointer(uintptr(ik) + uintptr(i)*ptrSize))
@@ -70,7 +70,11 @@ func (p *Predictor) GetOutput(index uint32) ([]float32, error) {
 		return nil, fmt.Errorf("Failed to get output shape: %d", n)
 	}
 
-	size := shapeDim //?
+	var size C.mx_uint = 1
+	for i := 0; i < int(shapeDim); i++ {
+		n := *(*C.mx_uint)(unsafe.Pointer( uintptr(unsafe.Pointer(shapeData)) + uintptr(i) * unsafe.Sizeof(size)))
+		size *= n
+	}
 	data := make([]C.mx_float, size)
 	if n, err := C.MXPredGetOutput(p.handle, C.mx_uint(index), (*C.mx_float)(&data[0]), size); err != nil {
 		return nil, err
