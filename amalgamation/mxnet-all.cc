@@ -12131,7 +12131,7 @@ void L2Norm(const TBlob &src,
   mshadow::Stream<xpu> *s = ctx.get_stream<xpu>();
   mshadow::Tensor<xpu, 1> out = ret->get<xpu, 1, real_t>(s);
   mshadow::Tensor<xpu, 1> in =
-      src.get_with_shape<xpu, 1, real_t>(mshadow::Shape1(src.shape_.Size()));
+      src.get_with_shape<xpu, 1, real_t>(mshadow::Shape1(src.shape_.Size()), s);
   mshadow::VectorDot(out, in, in);
   out = mshadow::expr::F<mxnet::op::mshadow_op::square_root>(out);
 }
@@ -12843,21 +12843,21 @@ class NDArray {
     ptr_->CheckAndAlloc();
   }
   /*!
-   * \brief Save list of narray into the file.
-   * \param fname name of the file.
+   * \brief Save list of narray into the Stream.x
+   * \param fo The stream of output.
    * \param data the NDArrays to be saved.
    * \param names the name of the NDArray, optional, can be zero length.
    */
-  static void Save(const std::string& fname,
+  static void Save(dmlc::Stream* fo,
                    const std::vector<NDArray>& data,
                    const std::vector<std::string>& names);
   /*!
-   * \brief Load list of narray into from the file.
-   * \param fname name of the file.
+   * \brief Load list of narray into from the stream.
+   * \param fi The stream of the input file.
    * \param data the NDArrays to be loaded
    * \param keys the name of the NDArray, if saved in the file.
    */
-  static void Load(const std::string& fname,
+  static void Load(dmlc::Stream* fi,
                    std::vector<NDArray>* data,
                    std::vector<std::string>* keys);
 
@@ -13692,10 +13692,9 @@ bool NDArray::Load(dmlc::Stream *strm) {
 
 const uint64_t kMXAPINDArrayListMagic = 0x112;
 
-void NDArray::Save(const std::string& fname,
+void NDArray::Save(dmlc::Stream* fo,
                    const std::vector<NDArray>& data,
                    const std::vector<std::string>& names) {
-  std::unique_ptr<dmlc::Stream> fo(dmlc::Stream::Create(fname.c_str(), "w"));
   uint64_t header = kMXAPINDArrayListMagic, reserved = 0;
   fo->Write(&header, sizeof(header));
   fo->Write(&reserved, sizeof(reserved));
@@ -13703,10 +13702,9 @@ void NDArray::Save(const std::string& fname,
   fo->Write(names);
 }
 
-void NDArray::Load(const std::string& fname,
+void NDArray::Load(dmlc::Stream* fi,
                    std::vector<NDArray>* data,
                    std::vector<std::string>* keys) {
-  std::unique_ptr<dmlc::Stream> fi(dmlc::Stream::Create(fname.c_str(), "r"));
   uint64_t header, reserved;
   CHECK(fi->Read(&header))
       << "Invalid NDArray file format";
@@ -16885,7 +16883,10 @@ class ImageNormalizeIter : public IIterator<DataInst> {
         // use python compatible ndarray store format
         std::vector<NDArray> data;
         std::vector<std::string> keys;
-        NDArray::Load(param_.mean_img, &data, &keys);
+        {
+          std::unique_ptr<dmlc::Stream> fi(dmlc::Stream::Create(param_.mean_img.c_str(), "r"));
+          NDArray::Load(fi.get(), &data, &keys);
+        }
         CHECK_EQ(data.size(), 1)
             << "Invalid mean image file format";
         data[0].WaitToRead();
@@ -17005,9 +17006,12 @@ class ImageNormalizeIter : public IIterator<DataInst> {
     meanimg_ *= (1.0f / imcnt);
     // save as mxnet python compatible format.
     TBlob tmp = meanimg_;
-    NDArray::Save(param_.mean_img,
-                  {NDArray(tmp, 0)},
-                  {"mean_img"});
+    {
+      std::unique_ptr<dmlc::Stream> fo(dmlc::Stream::Create(param_.mean_img.c_str(), "w"));
+      NDArray::Save(fo.get(),
+                    {NDArray(tmp, 0)},
+                    {"mean_img"});
+    }
     if (param_.verbose) {
       LOG(INFO) << "Save mean image to " << param_.mean_img << "..";
     }
@@ -27434,7 +27438,10 @@ int MXNDArraySave(const char* fname,
       names[i] = keys[i];
     }
   }
-  mxnet::NDArray::Save(fname, data, names);
+  {
+    std::unique_ptr<dmlc::Stream> fo(dmlc::Stream::Create(fname, "w"));
+    mxnet::NDArray::Save(fo.get(), data, names);
+  }
   API_END();
 }
 
@@ -27448,7 +27455,10 @@ int MXNDArrayLoad(const char* fname,
   API_BEGIN();
   std::vector<NDArray> data;
   std::vector<std::string> &names = ret->ret_vec_str;
-  mxnet::NDArray::Load(fname, &data, &names);
+  {
+    std::unique_ptr<dmlc::Stream> fi(dmlc::Stream::Create(fname, "r"));
+    mxnet::NDArray::Load(fi.get(), &data, &names);
+  }
   ret->ret_handles.resize(data.size());
   for (size_t i = 0; i < data.size(); ++i) {
     NDArray *ptr = new NDArray();
@@ -28298,8 +28308,9 @@ typedef void *NDListHandle;
 MXNET_DLL const char* MXGetLastError();
 /*!
  * \brief create a predictor
- * \param symbol_file The path to the symbol file.
- * \param param_file the path to the parameter file.
+ * \param symbol_json_str The JSON string of the symbol.
+ * \param param_bytes The in-memory raw bytes of parameter ndarray file.
+ * \param param_size The size of parameter ndarray file.
  * \param dev_type The device type, 1: cpu, 2:gpu
  * \param dev_id The device id of the predictor.
  * \param num_input_nodes Number of input nodes to the net,
@@ -28314,8 +28325,9 @@ MXNET_DLL const char* MXGetLastError();
  * \param out The created predictor handle.
  * \return 0 when success, -1 when failure.
  */
-MXNET_DLL int MXPredCreate(const char* symbol_file,
-                           const char* param_file,
+MXNET_DLL int MXPredCreate(const char* symbol_json_str,
+                           const char* param_bytes,
+                           size_t param_size,
                            int dev_type, int dev_id,
                            mx_uint num_input_nodes,
                            const char** input_keys,
@@ -28375,12 +28387,14 @@ MXNET_DLL int MXPredFree(PredictorHandle handle);
 /*!
  * \brief Create a NDArray List by loading from ndarray file.
  *     This can be used to load mean image file.
- * \param nd_file The path to the ndarray file to load.
+ * \param nd_file_bytes The byte contents of nd file to be loaded.
+ * \param nd_file_size The size of the nd file to be loaded.
  * \param out The out put NDListHandle
  * \param out_length Length of the list.
  * \return 0 when success, -1 when failure.
  */
-MXNET_DLL int MXNDListCreate(const char* nd_file,
+MXNET_DLL int MXNDListCreate(const char* nd_file_bytes,
+                             size_t nd_file_size,
                              NDListHandle *out,
                              mx_uint* out_length);
 /*!
@@ -28410,6 +28424,7 @@ MXNET_DLL int MXNDListFree(NDListHandle handle);
 //===== EXPANDED: mxnet/include/mxnet/c_predict_api.h =====
 
 
+
 using namespace mxnet;
 
 // predictor interface
@@ -28433,8 +28448,9 @@ struct MXAPINDList {
   std::vector<mx_float> data;
 };
 
-int MXPredCreate(const char* symbol_file,
-                 const char* param_file,
+int MXPredCreate(const char* symbol_json_str,
+                 const char* param_bytes,
+                 size_t param_size,
                  int dev_type, int dev_id,
                  mx_uint num_input_nodes,
                  const char** input_keys,
@@ -28446,18 +28462,18 @@ int MXPredCreate(const char* symbol_file,
   Symbol sym;
   // load in the symbol.
   {
-    std::unique_ptr<dmlc::Stream> fi(dmlc::Stream::Create(symbol_file, "r"));
-    dmlc::istream is(fi.get());
+    std::string json = symbol_json_str;
+    std::istringstream is(json);
     dmlc::JSONReader reader(&is);
     sym.Load(&reader);
-    is.set_stream(nullptr);
   }
   // load the parameters
   std::unordered_map<std::string, NDArray> arg_params, aux_params;
   {
     std::vector<NDArray> data;
     std::vector<std::string> names;
-    NDArray::Load(param_file, &data, &names);
+    dmlc::MemoryFixedSizeStream fi((void*)param_bytes, param_size);  // NOLINT(*)
+    NDArray::Load(&fi, &data, &names);
     CHECK_EQ(names.size(), data.size())
         << "Invalid param file format";
     for (size_t i = 0; i < names.size(); ++i) {
@@ -28579,13 +28595,15 @@ int MXPredFree(PredictorHandle handle) {
   API_END();
 }
 
-int MXNDListCreate(const char* nd_file,
+int MXNDListCreate(const char* nd_file_bytes,
+                   size_t nd_file_size,
                    NDListHandle *out,
                    mx_uint* out_length) {
   MXAPINDList* ret = new MXAPINDList();
   API_BEGIN();
   std::vector<NDArray> arrays;
-  NDArray::Load(nd_file,
+  dmlc::MemoryFixedSizeStream fi((void*)nd_file_bytes, nd_file_size);  // NOLINT(*)
+  NDArray::Load(&fi,
                 &(arrays),
                 &(ret->keys));
   if (ret->keys.size() == 0) {
