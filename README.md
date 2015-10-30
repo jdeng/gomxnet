@@ -37,7 +37,7 @@ import "C"
 ```
  * Build the sample ```main.go``` with ```go build```. You need to install a dependent library with ```go get github.com/disintegration/imaging```
  * Tested with golang 1.5
- * Sample usage
+ * Sample usage (see ```src/main.go```)
 ```
   // read model files into memory
   symbol, _ := ioutil.ReadFile("../Inception-symbol.json")
@@ -60,3 +60,5 @@ import "C"
   pred.Free()
 
 ```
+
+ * Download the model file package from [https://github.com/dmlc/mxnet-model-gallery] and update the path in ```main.go```. Build with ```go build```. Try with cat15.jpg, the program should be able to recognize the cat.
