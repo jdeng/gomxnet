@@ -25,7 +25,8 @@ ar rcs mxnet-all.a mxnet-all.o
 ```
 
 ## Go binding for predictor
- * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly.
+ * Build ```mxnet-all.a``` as shown above.
+ * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly. (Note the ```#cgo LDFLAGS``` line.
 ```
 ...
 //#cgo LDFLAGS: /Users/jack/Work/gomxnet/amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
