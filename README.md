@@ -3,7 +3,7 @@ Amalgamation and go binding
 
 ## mxnet amalgamation
  * Check out mxnet, e.g., in ~/Sources/, update submodules and build
- * Generate mxnet-all.cc in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first line to point to your mxnet directory.
+ * Generate ```mxnet-all.cc``` in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first line to point to your mxnet directory.
 ```
 export MXNET_ROOT=~/Source/mxnet
 rm -f ./mxnet
@@ -25,7 +25,7 @@ ar rcs mxnet-all.a mxnet-all.o
 ```
 
 ## Go binding for predictor
- * Build ```mxnet-all.a``` as shown above.
+ * Build ```mxnet-all.a``` as shown above. Please note regenerating ```mxnet-all.cc``` is optional. You can use the one in the directory.
  * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly. (Note the ```#cgo LDFLAGS``` line.
 ```
 ...
