@@ -6,7 +6,7 @@ ln -s $MXNET_ROOT ./mxnet
 echo "Generating deps from $MXNET_ROOT to mxnet0.d with mxnet0.cc"
 g++ -MD -MF mxnet0.d -std=c++11 -Wall -I ./mxnet/ -I ./mxnet/mshadow/ -I ./mxnet/dmlc-core/include -I ./mxnet/include -I$OPENBLAS_ROOT/include -c  mxnet0.cc
 
-echo "Generating amalgamation to mxnet-all.cc. Use build.sh to generate mxnet-all.a"
+echo "Generating amalgamation to mxnet.cc"
 python ./expand.py
 
 cp mxnet.cc ../

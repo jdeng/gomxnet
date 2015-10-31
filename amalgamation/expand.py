@@ -24,7 +24,7 @@ def find_source(name, start):
 	if not candidates: return ''
 	if len(candidates) == 1: return candidates[0]
 	for x in candidates:
-		print 'multiple candidates: %s, looking for %s, candidates: %s' %(start, name, str(candidates))
+#		print 'multiple candidates: %s, looking for %s, candidates: %s' %(start, name, str(candidates))
 		if x.split('/')[1] == start.split('/')[1]: return x
 	return ''
 
@@ -41,7 +41,7 @@ def expand(x, pending):
 		return
 	
 	if x in pending:
-		print 'loop found: %s in ' % x, pending
+#		print 'loop found: %s in ' % x, pending
 		return
 
 	print >>out, "//===== EXPANDIND: %s =====\n" %x
