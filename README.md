@@ -3,7 +3,7 @@ Amalgamation and go binding
 
 ## mxnet amalgamation
  * Check out mxnet, e.g., in ~/Sources/, update submodules and build
- * Generate mxnet-all.cc in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first line to point to your mxnet directory.
+ * Generate ```mxnet-all.cc``` in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first line to point to your mxnet directory.
 ```
 export MXNET_ROOT=~/Source/mxnet
 rm -f ./mxnet
@@ -25,7 +25,8 @@ ar rcs mxnet-all.a mxnet-all.o
 ```
 
 ## Go binding for predictor
- * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly.
+ * Build ```mxnet-all.a``` as shown above. Please note regenerating ```mxnet-all.cc``` is optional. You can use the one in the directory.
+ * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly. (Note the ```#cgo LDFLAGS``` line.
 ```
 ...
 //#cgo LDFLAGS: /Users/jack/Work/gomxnet/amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
@@ -36,7 +37,7 @@ import "C"
 ```
  * Build the sample ```main.go``` with ```go build```. You need to install a dependent library with ```go get github.com/disintegration/imaging```
  * Tested with golang 1.5
- * Sample usage
+ * Sample usage (see ```src/main.go```)
 ```
   // read model files into memory
   symbol, _ := ioutil.ReadFile("./Inception-symbol.json")
@@ -59,3 +60,5 @@ import "C"
   pred.Free()
 
 ```
+
+ * Download the model file package from [https://github.com/dmlc/mxnet-model-gallery] and update the path in ```main.go```. Build with ```go build```. Try with cat15.jpg, the program should be able to recognize the cat.
