@@ -1,5 +1,5 @@
 // https://github.com/gonum/floats/blob/master/floats.go
-package gomxnet
+package predict
 
 import (
 	"sort"

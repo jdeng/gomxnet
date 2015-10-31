@@ -1,4 +1,4 @@
-package gomxnet
+package predict 
 
 //#cgo LDFLAGS: /Users/jack/Work/gomxnet/amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
 //#include <stdlib.h>

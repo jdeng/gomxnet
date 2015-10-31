@@ -1,4 +1,4 @@
-package gomxnet
+package predict 
 
 import (
 	"fmt"
