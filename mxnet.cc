@@ -62,7 +62,7 @@
 #include <utility>
 #include <vector>
 
-//===== EXPANDIND: mxnet.cc =====
+//===== EXPANDIND: mxnet0.cc =====
 
 // mexnet.cc
 
@@ -31520,6 +31520,6 @@ bool RecordIOChunkReader::NextRecord(InputSplit::Blob *out_rec) {
 //===== EXPANDED: mxnet/dmlc-core/src/recordio.cc =====
 
 
-//===== EXPANDED: mxnet.cc =====
+//===== EXPANDED: mxnet0.cc =====
 
 
