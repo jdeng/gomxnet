@@ -1,6 +1,5 @@
 package main
 
-//#cgo LDFLAGS: -L ../amalgamation ../amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
 import "C"
 
 import (
@@ -30,7 +29,7 @@ func main() {
 		panic(err)
 	}
 
-	var batch uint32 = 2
+	var batch uint32 = 1
 	img, _, _ := image.Decode(reader)
 	img = imaging.Fill(img, 224, 224, imaging.Center, imaging.Lanczos)
 
@@ -39,15 +38,15 @@ func main() {
 		jpeg.Encode(test, img, nil)
 	*/
 
-	symbol, err := ioutil.ReadFile("../Inception-symbol.json")
+	symbol, err := ioutil.ReadFile("./Inception-symbol.json")
 	if err != nil {
 		panic(err)
 	}
-	params, err := ioutil.ReadFile("../Inception-0009.params")
+	params, err := ioutil.ReadFile("./Inception-0009.params")
 	if err != nil {
 		panic(err)
 	}
-	synset, err := os.Open("../synset.txt")
+	synset, err := os.Open("./synset.txt")
 	if err != nil {
 		panic(err)
 	}
@@ -57,7 +56,7 @@ func main() {
 		panic(err)
 	}
 
-	input, _ := gomxnet.InputFrom([]image.Image{img, img}, gomxnet.ImageMean{117.0, 117.0, 117.0})
+	input, _ := gomxnet.InputFrom([]image.Image{img}, gomxnet.ImageMean{117.0, 117.0, 117.0})
 	pred.Forward("data", input)
 	output, _ := pred.GetOutput(0)
 	pred.Free()
