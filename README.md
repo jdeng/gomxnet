@@ -60,3 +60,7 @@ import "unsafe"
 
 ```
 
+# TODO
+* Merge openblas into the amalgamation?
+* Add Train API?
+
