@@ -6,13 +6,13 @@ blacklist = [
 
 sources = []
 files = []
-# g++ -MD -MF mxnet.d -std=c++11 -Wall -I./mshadow/ -I./dmlc-core/include -Iinclude  -I/usr/local//Cellar/openblas/0.2.14_1/include -c  mxnet.cc
-for line in open('mxnet.d'):
+# g++ -MD -MF mxnet0.d -std=c++11 -Wall -I./mshadow/ -I./dmlc-core/include -Iinclude  -I/usr/local//Cellar/openblas/0.2.14_1/include -c  mxnet0.cc
+for line in open('mxnet0.d'):
 	files = files + line.strip().split(' ')
 
 for f in files:
 	f = f.strip()
-	if not f or f == 'mxnet.o:' or f == '\\': continue
+	if not f or f == 'mxnet0.o:' or f == '\\': continue
 	fn = os.path.relpath(f)
 	if fn.find('/usr/') < 0 and fn not in sources:
 		sources.append(fn)
@@ -66,9 +66,9 @@ def expand(x, pending):
 	print >>out, "//===== EXPANDED: %s =====\n" %x
 	history[x] = 1
 
-expand('mxnet.cc', [])
+expand('mxnet0.cc', [])
 
-f = open('mxnet-all.cc', 'wb')
+f = open('mxnet.cc', 'wb')
 print >>f, '''
 #if defined(__MACH__)
 #include <mach/clock.h>

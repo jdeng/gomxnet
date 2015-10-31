@@ -1,5 +1,8 @@
 package main
 
+//#cgo LDFLAGS: -L ../amalgamation ../amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+import "C"
+
 import (
 	"github.com/jdeng/gomxnet"
 	"bufio"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/disintegration/imaging"
 )
+
 
 func main() {
 	flag.Parse()

@@ -1,8 +1,9 @@
-package predict 
+package gomxnet
 
-//#cgo LDFLAGS: amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+//#cgo CXXFLAGS: -std=c++11 -I/usr/local/Cellar/openblas/0.2.14_1/include
+//#cgo LDFLAGS: -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
 //#include <stdlib.h>
-//#include "amalgamation/c_predict_api.h"
+//#include "mxnet.h"
 import "C"
 import "unsafe"
 
