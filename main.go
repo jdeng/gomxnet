@@ -1,7 +1,7 @@
 package main
 
 import (
-	"./gomxnet"
+	"github.com/jdeng/gomxnet"
 	"bufio"
 	"flag"
 	"fmt"

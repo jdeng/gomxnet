@@ -39,8 +39,8 @@ import "C"
  * Sample usage
 ```
   // read model files into memory
-  symbol, _ := ioutil.ReadFile("../Inception-symbol.json")
-  params, _ := ioutil.ReadFile("../Inception-0009.params")
+  symbol, _ := ioutil.ReadFile("./Inception-symbol.json")
+  params, _ := ioutil.ReadFile("./Inception-0009.params")
   
   // create predictor with model, device and input node config
   batch := 1
