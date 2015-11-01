@@ -1,5 +1,5 @@
 # gomxnet
-Amalgamation and go binding
+Amalgamation and go binding for mxnet https://github.com/dmlc/mxnet
 
  
 ## Go binding for predictor
