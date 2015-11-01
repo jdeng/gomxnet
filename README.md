@@ -1,43 +1,42 @@
 # gomxnet
 Amalgamation and go binding
 
-## mxnet amalgamation
+## mxnet amalgamation (this is optional. A pre-generated mxnet.cc is already in the directory.)
  * Check out mxnet, e.g., in ~/Sources/, update submodules and build
- * Generate ```mxnet-all.cc``` in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first line to point to your mxnet directory.
+ * Generate ```mxnet.cc``` in ```amalgamation``` directory using ```amalgamation/gen.sh``` (content shown below). You may need to update the first two lines to point to your mxnet and openblas locations.
 ```
 export MXNET_ROOT=~/Source/mxnet
+export OPENBLAS_ROOT=/usr/local/Cellar/openblas/0.2.14_1
 rm -f ./mxnet
 echo "Linking $MXNET_ROOT to ./mxnet"
 ln -s $MXNET_ROOT ./mxnet
-echo "Generating deps from $MXNET_ROOT to mxnet.d with mxnet.cc"
-g++ -MD -MF mxnet.d -std=c++11 -Wall -I ./mxnet/ -I ./mxnet/mshadow/ -I ./mxnet/dmlc-core/include -I ./mxnet/include -I/usr/local/Cellar/openblas/0.2.14_1/include -c  mxnet.cc
+echo "Generating deps from $MXNET_ROOT to mxnet0.d with mxnet0.cc"
+g++ -MD -MF mxnet0.d -std=c++11 -Wall -I ./mxnet/ -I ./mxnet/mshadow/ -I ./mxnet/dmlc-core/include -I ./mxnet/include -I$OPENBLAS_ROOT/include -c  mxnet0.cc
 
-echo "Generating amalgamation to mxnet-all.cc. Use build.sh to generate mxnet-all.a"
+echo "Generating amalgamation to mxnet.cc"
 python ./expand.py
+
+cp mxnet.cc ../
 echo "Done"
 ```
- * Build static libary ```mxnet-all.a``` with ```amalgamation/build.sh``` (content shown below). You'll need to install openblas (e.g., in Mac OS X with ```brew install openblas```) and update the include path below.
-```
-echo "Building mxnet-all.a from mxnet-all.cc"
-export CXX=g++
-$CXX -O3 -g -I/usr/local/Cellar/openblas/0.2.14_1/include -std=c++11 -Wall -o mxnet-all.o -c mxnet-all.cc 
-ar rcs mxnet-all.a mxnet-all.o
-```
-
+ 
 ## Go binding for predictor
- * Build ```mxnet-all.a``` as shown above. Please note regenerating ```mxnet-all.cc``` is optional. You can use the one in the directory.
- * Update ```src/gomxnet/predict.go```. Point to your static library ```mxnet-all.a``` and update ```openblas``` library path accordingly. (Note the ```#cgo LDFLAGS``` line.
+ * Use ```go get github.com/jdeng/gomxnet``` to install. If your openblas version happens to be 0.2.14_1 you are all set.
+ * Update ```predict.go```: update ```openblas``` library path accordingly (the first two lines).
 ```
 ...
-//#cgo LDFLAGS: /Users/jack/Work/gomxnet/amalgamation/mxnet-all.a -lstdc++ -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+//#cgo CXXFLAGS: -std=c++11 -I/usr/local/Cellar/openblas/0.2.14_1/include
+//#cgo LDFLAGS: -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
 //#include <stdlib.h>
-//#include "../../amalgamation/c_predict_api.h"
+//#include "mxnet.h"
 import "C"
+import "unsafe"
 ...
 ```
- * Build the sample ```main.go``` with ```go build```. You need to install a dependent library with ```go get github.com/disintegration/imaging```
+ * Build the sample ```example/main.go``` with ```go build```. You need to install a dependent library with ```go get github.com/disintegration/imaging```.
+ ** Download the model file package from [https://github.com/dmlc/mxnet-model-gallery] and update the path in ```main.go```. Build with ```go build```. Try with ```./example cat15.jpg```, the program should be able to recognize the cat.
  * Tested with golang 1.5
- * Sample usage (see ```src/main.go```)
+ * Sample usage (from ```src/main.go```)
 ```
   // read model files into memory
   symbol, _ := ioutil.ReadFile("./Inception-symbol.json")
@@ -61,4 +60,7 @@ import "C"
 
 ```
 
- * Download the model file package from [https://github.com/dmlc/mxnet-model-gallery] and update the path in ```main.go```. Build with ```go build```. Try with cat15.jpg, the program should be able to recognize the cat.
+# TODO
+* Merge openblas into the amalgamation?
+* Add Train API?
+
