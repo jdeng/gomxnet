@@ -39,7 +39,9 @@
 #include "src/operator/regression_output.cc"
 #include "src/operator/reshape.cc"
 #include "src/operator/slice_channel.cc"
-#include "src/operator/softmax.cc"
+#include "src/operator/softmax_output.cc"
+#include "src/operator/deconvolution.cc"
+#include "src/operator/native_op.cc"
 #include "src/storage/storage.cc"
 #include "src/common/tblob_op_registry.cc"
 

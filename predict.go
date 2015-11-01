@@ -1,7 +1,8 @@
 package gomxnet
 
 //#cgo CXXFLAGS: -std=c++11 -I/usr/local/Cellar/openblas/0.2.14_1/include
-//#cgo LDFLAGS: -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas
+//#cgo LDFLAGS: -L /usr/local/Cellar/openblas/0.2.14_1/lib/ -lopenblas 
+////// #cgo LDFLAGS: /Users/jack/Source/go/src/github.com/jdeng/gomxnet/mxnet.a -lstdc++
 //#include <stdlib.h>
 //#include "mxnet.h"
 import "C"

@@ -10682,8 +10682,8 @@ operator/(const ScalarExp<MSHADOW_SCALAR_> &lhs, const Exp<TB, MSHADOW_SCALAR_, 
 #endif
 
 /*!
-* \brief define dllexport for Visual Studio
-*/
+ * \brief define dllexport for Visual Studio
+ */
 #ifdef _MSC_VER
 #ifdef MXNET_EXPORTS
 #define MXNET_API __declspec(dllexport)
@@ -10693,6 +10693,14 @@ operator/(const ScalarExp<MSHADOW_SCALAR_> &lhs, const Exp<TB, MSHADOW_SCALAR_, 
 #else
 #define MXNET_API
 #endif
+
+/*!
+ * \brief define prediction only
+ */
+#ifndef MXNET_PREDICT_ONLY
+#define MXNET_PREDICT_ONLY 0
+#endif
+
 
 /*! \brief namespace of mxnet */
 namespace mxnet {
@@ -13795,10 +13803,11 @@ MXNET_REGISTER_NDARRAY_FUN(dot).set_function(BinaryOp<ndarray::Dot>)
 
 MXNET_REGISTER_NDARRAY_FUN(_onehot_encode).set_function(BinaryOp<ndarray::OneHotEncode>);
 
-MXNET_REGISTER_NDARRAY_FUN(choose_element)
+MXNET_REGISTER_NDARRAY_FUN(choose_element_0index)
 .set_function(BinaryOp<ndarray::MatChooseRowElem>)
 .describe("Choose one element from each line(row for python, column for R/Julia)"
-          " in lhs according to index indicated by rhs");
+          " in lhs according to index indicated by rhs."
+          " This function assume rhs uses 0-based index.");
 
 // register API function
 // those with underscore will be registered at NDArray
@@ -13928,10 +13937,12 @@ static constexpr std::size_t kMaxNumGPUs = 16;
 // predeclare factory function for each type of engine
 /*! \return NaiveEngine instance */
 Engine *CreateNaiveEngine();
+#if MXNET_PREDICT_ONLY == 0
 /*! \return ThreadedEnginePooled instance */
 Engine *CreateThreadedEnginePooled();
 /*! \return ThreadedEnginePerDevie instance */
 Engine *CreateThreadedEnginePerDevice();
+#endif
 }  // namespace engine
 }  // namespace mxnet
 #endif  // MXNET_ENGINE_ENGINE_IMPL_H_
@@ -13947,6 +13958,7 @@ inline Engine* CreateEngine() {
   std::string stype = type;
 
   Engine *ret = nullptr;
+  #if MXNET_PREDICT_ONLY == 0
   if (stype == "NaiveEngine") {
     ret = CreateNaiveEngine();
   } else if (stype == "ThreadedEngine") {
@@ -13954,6 +13966,9 @@ inline Engine* CreateEngine() {
   } else if (stype == "ThreadedEnginePerDevice") {
     ret = CreateThreadedEnginePerDevice();
   }
+  #else
+  ret = CreateNaiveEngine();
+  #endif
 
   if (ret ==nullptr) {
     LOG(FATAL) << "Cannot find Engine " << type;
@@ -19795,6 +19810,7 @@ GraphExecutor::GetOpExecEntry(uint32_t nid) {
 }
 
 GraphExecutor::~GraphExecutor() {
+  Engine::Get()->WaitForAll();
   // need to delete the operators before delete the NDArray they referenced.
   for (OpNode& node : op_nodes_) {
     node.DeleteOperator();
@@ -21881,41 +21897,46 @@ MXNET_REGISTER_OP_PROPERTY(BlockGrad, BlockGradientProp)
 namespace mxnet {
 namespace op {
 
-using mshadow::expr::concat;
-
-
 template<typename xpu, int dim>
 inline void Concatenate(const std::vector<mshadow::Tensor<xpu, dim> > &input,
                         mshadow::Tensor<xpu, dim> *output) {
+  using mshadow::expr::concat;
+  using mshadow::expr::slice;
   mshadow::Tensor<xpu, dim> out = *output;
   size_t size = input.size();
   switch (size) {
-    case 2:
+    case 2: {
       out = concat<1>(input[0], input[1]);
       break;
-    case 3:
+    }
+    case 3: {
       out = concat<1>(input[0],
                       concat<1>(input[1], input[2]));
       break;
-    case 4:
+    }
+    case 4: {
       out = concat<1>(input[0],
                       concat<1>(input[1],
                                 concat<1>(input[2], input[3])));
       break;
-    case 5:
-      out = concat<1>(input[0],
-                      concat<1>(input[1],
-                                concat<1>(input[2],
-                                          concat<1>(input[3], input[4]))));
+    }
+    default: {
+      index_t begin = 0;
+      for (index_t i = 0; i < size; ++i) {
+        index_t end = begin + input[i].size(1);
+        slice<1>(out, begin, end) = input[i];
+        begin = end;
+      }
       break;
-    default:
-      LOG(FATAL) << "Incorrect concat size: " << size;
+    }
   }
 }
 
 template<typename xpu, int dim>
 void Split(const mshadow::Tensor<xpu, dim> &input,
            std::vector<mshadow::Tensor<xpu, dim> > *output) {
+  using mshadow::expr::concat;
+  using mshadow::expr::slice;
   std::vector<mshadow::Tensor<xpu, dim> > out = *output;
   size_t size = out.size();
   switch (size) {
@@ -21934,15 +21955,15 @@ void Split(const mshadow::Tensor<xpu, dim> &input,
                           concat<1>(out[2], out[3]))) = input;
       break;
     }
-    case 5: {
-      concat<1>(out[0],
-                concat<1>(out[1],
-                          concat<1>(out[2],
-                                    concat<1>(out[3], out[4])))) = input;
+    default: {
+      index_t begin = 0;
+      for (index_t i = 0; i < size; ++i) {
+        index_t end = begin + out[i].size(1);
+        out[i] = slice<1>(input, begin, end);
+        begin = end;
+      }
       break;
     }
-    default:
-      LOG(FATAL) << "Incorrect concat size: " << size;
   }
 }
 }  // namespace op
@@ -21962,7 +21983,7 @@ enum ConcatOpOutputs {kOut};
 struct ConcatParam : public dmlc::Parameter<ConcatParam> {
   int num_args;
   DMLC_DECLARE_PARAMETER(ConcatParam) {
-    DMLC_DECLARE_FIELD(num_args).set_range(1,  6)
+    DMLC_DECLARE_FIELD(num_args).set_lower_bound(1)
     .describe("Number of inputs to be concated.");
   }
 };  // struct ConcatParam
@@ -22195,7 +22216,9 @@ struct ConvolutionParam : public dmlc::Parameter<ConvolutionParam> {
     DMLC_DECLARE_FIELD(num_filter).set_range(1, 100000)
     .describe("convolution filter(channel) number");
     DMLC_DECLARE_FIELD(num_group).set_default(1)
-    .describe("number of groups partition");
+    .describe("Number of groups partition. "
+              "This option is not supported by CuDNN, you can use SliceChannel to num_group,"
+              "apply convolution and concat instead to achieve the same need.");
     DMLC_DECLARE_FIELD(workspace).set_default(512).set_range(128, 4096)
     .describe("Tmp workspace for convolution (MB)");
     DMLC_DECLARE_FIELD(no_bias).set_default(false)
@@ -24744,7 +24767,7 @@ enum SliceChannelOpOutputs {kOut0, kOut1, kOut2, kOut3, kOut4};
 struct SliceChannelParam : public dmlc::Parameter<SliceChannelParam> {
   int num_outputs;
   DMLC_DECLARE_PARAMETER(SliceChannelParam) {
-    DMLC_DECLARE_FIELD(num_outputs).set_range(1,  6)
+    DMLC_DECLARE_FIELD(num_outputs).set_lower_bound(1)
     .describe("Number of outputs to be sliced.");
   }
 };  // struct SliceChannelParam
@@ -24919,38 +24942,38 @@ MXNET_REGISTER_OP_PROPERTY(SliceChannel, SliceChannelProp)
 
 //===== EXPANDED: mxnet/src/operator/slice_channel.cc =====
 
-//===== EXPANDIND: mxnet/src/operator/softmax.cc =====
+//===== EXPANDIND: mxnet/src/operator/softmax_output.cc =====
 
 /*!
  * Copyright (c) 2015 by Contributors
- * \file softmax.cc
+ * \file softmax_output.cc
  * \brief
  * \author Bing Xu
 */
-//===== EXPANDIND: mxnet/src/operator/softmax-inl.h =====
+//===== EXPANDIND: mxnet/src/operator/softmax_output-inl.h =====
 
 /*!
  * Copyright (c) 2015 by Contributors
- * \file softmax-inl.h
+ * \file softmax_output-inl.h
  * \brief
  * \author Bing Xu
 */
-#ifndef MXNET_OPERATOR_SOFTMAX_INL_H_
-#define MXNET_OPERATOR_SOFTMAX_INL_H_
+#ifndef MXNET_OPERATOR_SOFTMAX_OUTPUT_INL_H_
+#define MXNET_OPERATOR_SOFTMAX_OUTPUT_INL_H_
 
 
 namespace mxnet {
 namespace op {
 
-namespace softmax_enum {
-enum SoftmaxOpInputs {kData, kLabel};
-enum SoftmaxOpOutputs {kOut};
-}  // namespace softmax_enum
+namespace softmaxout_enum {
+enum SoftmaxOutputOpInputs {kData, kLabel};
+enum SoftmaxOutputOpOutputs {kOut};
+}  // namespace softmaxout_enum
 
-struct SoftmaxParam : public dmlc::Parameter<SoftmaxParam> {
+struct SoftmaxOutputParam : public dmlc::Parameter<SoftmaxOutputParam> {
   float grad_scale;
   bool multi_output;
-  DMLC_DECLARE_PARAMETER(SoftmaxParam) {
+  DMLC_DECLARE_PARAMETER(SoftmaxOutputParam) {
     DMLC_DECLARE_FIELD(grad_scale).set_default(1.0f)
     .describe("Scale the gradient by a float factor");
     DMLC_DECLARE_FIELD(multi_output).set_default(false)
@@ -24961,9 +24984,9 @@ struct SoftmaxParam : public dmlc::Parameter<SoftmaxParam> {
 };
 
 template<typename xpu>
-class SoftmaxOp : public Operator {
+class SoftmaxOutputOp : public Operator {
  public:
-  explicit SoftmaxOp(SoftmaxParam param) : param_(param) {}
+  explicit SoftmaxOutputOp(SoftmaxOutputParam param) : param_(param) {}
 
   virtual void Forward(const OpContext &ctx,
                        const std::vector<TBlob> &in_data,
@@ -24972,19 +24995,19 @@ class SoftmaxOp : public Operator {
                        const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 2) << "Softmax Input: [data, label]";
-    CHECK_EQ(out_data.size(), 1) << "Softmax Output: [output]";
+    CHECK_EQ(in_data.size(), 2) << "SoftmaxOutput Input: [data, label]";
+    CHECK_EQ(out_data.size(), 1) << "SoftmaxOutput Output: [output]";
     Stream<xpu> *s = ctx.get_stream<xpu>();
     if (param_.multi_output) {
-      int n = in_data[softmax_enum::kData].size(0);
-      int k = in_data[softmax_enum::kData].size(1);
-      Shape<3> s3 = Shape3(n, k, static_cast<int>(in_data[softmax_enum::kData].Size()/n/k));
-      Tensor<xpu, 3> data = in_data[softmax_enum::kData].get_with_shape<xpu, 3, real_t>(s3, s);
-      Tensor<xpu, 3> out = out_data[softmax_enum::kOut].get_with_shape<xpu, 3, real_t>(s3, s);
+      int n = in_data[softmaxout_enum::kData].size(0);
+      int k = in_data[softmaxout_enum::kData].size(1);
+      Shape<3> s3 = Shape3(n, k, static_cast<int>(in_data[softmaxout_enum::kData].Size()/n/k));
+      Tensor<xpu, 3> data = in_data[softmaxout_enum::kData].get_with_shape<xpu, 3, real_t>(s3, s);
+      Tensor<xpu, 3> out = out_data[softmaxout_enum::kOut].get_with_shape<xpu, 3, real_t>(s3, s);
       Softmax(out, data);
     } else {
-      Tensor<xpu, 2> data = in_data[softmax_enum::kData].FlatTo2D<xpu, real_t>(s);
-      Tensor<xpu, 2> out = out_data[softmax_enum::kOut].FlatTo2D<xpu, real_t>(s);
+      Tensor<xpu, 2> data = in_data[softmaxout_enum::kData].FlatTo2D<xpu, real_t>(s);
+      Tensor<xpu, 2> out = out_data[softmaxout_enum::kOut].FlatTo2D<xpu, real_t>(s);
       Softmax(out, data);
     }
   }
@@ -25004,20 +25027,20 @@ class SoftmaxOp : public Operator {
     CHECK_GE(req.size(), 1);
     Stream<xpu> *s = ctx.get_stream<xpu>();
     if (param_.multi_output) {
-      int n = out_data[softmax_enum::kOut].size(0);
-      int k = out_data[softmax_enum::kOut].size(1);
-      Shape<3> s3 = Shape3(n, k, static_cast<int>(out_data[softmax_enum::kOut].Size()/n/k));
-      Tensor<xpu, 2> label = in_data[softmax_enum::kLabel].FlatTo2D<xpu, real_t>(s);
-      Tensor<xpu, 3> out = out_data[softmax_enum::kOut].get_with_shape<xpu, 3, real_t>(s3, s);
-      Tensor<xpu, 3> grad = in_grad[softmax_enum::kData].get_with_shape<xpu, 3, real_t>(s3, s);
+      int n = out_data[softmaxout_enum::kOut].size(0);
+      int k = out_data[softmaxout_enum::kOut].size(1);
+      Shape<3> s3 = Shape3(n, k, static_cast<int>(out_data[softmaxout_enum::kOut].Size()/n/k));
+      Tensor<xpu, 2> label = in_data[softmaxout_enum::kLabel].FlatTo2D<xpu, real_t>(s);
+      Tensor<xpu, 3> out = out_data[softmaxout_enum::kOut].get_with_shape<xpu, 3, real_t>(s3, s);
+      Tensor<xpu, 3> grad = in_grad[softmaxout_enum::kData].get_with_shape<xpu, 3, real_t>(s3, s);
       SoftmaxGrad(grad, out, label);
       if (param_.grad_scale < 1.0) {
         grad *= param_.grad_scale;
       }
     } else {
-      Tensor<xpu, 1> label = in_data[softmax_enum::kLabel].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 2> out = out_data[softmax_enum::kOut].FlatTo2D<xpu, real_t>(s);
-      Tensor<xpu, 2> grad = in_grad[softmax_enum::kData].FlatTo2D<xpu, real_t>(s);
+      Tensor<xpu, 1> label = in_data[softmaxout_enum::kLabel].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 2> out = out_data[softmaxout_enum::kOut].FlatTo2D<xpu, real_t>(s);
+      Tensor<xpu, 2> grad = in_grad[softmaxout_enum::kData].FlatTo2D<xpu, real_t>(s);
       SoftmaxGrad(grad, out, label);
       if (param_.grad_scale < 1.0) {
         grad *= param_.grad_scale;
@@ -25026,15 +25049,15 @@ class SoftmaxOp : public Operator {
   }
 
  private:
-  SoftmaxParam param_;
-};  // class SoftmaxOp
+  SoftmaxOutputParam param_;
+};  // class SoftmaxOutputOp
 
 // Decalre Factory function, used for dispatch specialization
 template<typename xpu>
-Operator* CreateOp(SoftmaxParam param);
+Operator* CreateOp(SoftmaxOutputParam param);
 
 #if DMLC_USE_CXX11
-class SoftmaxProp : public OperatorProperty {
+class SoftmaxOutputProp : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
     return {"data", "label"};
@@ -25056,10 +25079,10 @@ class SoftmaxProp : public OperatorProperty {
     const TShape &dshape = in_shape->at(0);
     if (dshape.ndim() == 0) return false;
     if (param_.multi_output) {
-      SHAPE_ASSIGN_CHECK(*in_shape, softmax_enum::kLabel,
+      SHAPE_ASSIGN_CHECK(*in_shape, softmaxout_enum::kLabel,
                          Shape2(dshape[0], dshape.Size()/dshape[0]/dshape[1]));
     } else {
-      SHAPE_ASSIGN_CHECK(*in_shape, softmax_enum::kLabel, Shape1(dshape[0]));
+      SHAPE_ASSIGN_CHECK(*in_shape, softmaxout_enum::kLabel, Shape1(dshape[0]));
     }
     out_shape->clear();
     out_shape->push_back(dshape);
@@ -25067,20 +25090,20 @@ class SoftmaxProp : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new SoftmaxProp();
+    auto ptr = new SoftmaxOutputProp();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "Softmax";
+    return "SoftmaxOutput";
   }
 
   std::vector<int> DeclareBackwardDependency(
     const std::vector<int> &out_grad,
     const std::vector<int> &in_data,
     const std::vector<int> &out_data) const override {
-    return {in_data[softmax_enum::kLabel], out_data[softmax_enum::kOut]};
+    return {in_data[softmaxout_enum::kLabel], out_data[softmaxout_enum::kOut]};
   }
 
   std::vector<std::pair<int, void*> > BackwardInplaceOption(
@@ -25088,50 +25111,1685 @@ class SoftmaxProp : public OperatorProperty {
     const std::vector<int> &in_data,
     const std::vector<int> &out_data,
     const std::vector<void*> &in_grad) const override {
-    return {{out_data[softmax_enum::kOut], in_grad[softmax_enum::kData]}};
+    return {{out_data[softmaxout_enum::kOut], in_grad[softmaxout_enum::kData]}};
   }
 
   std::vector<std::pair<int, void*> > ForwardInplaceOption(
     const std::vector<int> &in_data,
     const std::vector<void*> &out_data) const override {
-    return {{in_data[softmax_enum::kData], out_data[softmax_enum::kOut]}};
+    return {{in_data[softmaxout_enum::kData], out_data[softmaxout_enum::kOut]}};
   }
 
   Operator* CreateOperator(Context ctx) const;
 
- private:
-  SoftmaxParam param_;
-};  // class SoftmaxProp
+ protected:
+  SoftmaxOutputParam param_;
+};  // class SoftmaxOutputProp
+
+class DeprecatedSoftmaxProp : public SoftmaxOutputProp {
+ public:
+  std::string TypeString() const override {
+    LOG(INFO) << "Softmax symbol is renamed to SoftmaxOutput. "
+      << "This API will be deprecated in Dec, 2015";
+    return "Softmax";
+  }
+};
 #endif  // DMLC_USE_CXX11
 
 }  // namespace op
 }  // namespace mxnet
-#endif  // MXNET_OPERATOR_SOFTMAX_INL_H_
-//===== EXPANDED: mxnet/src/operator/softmax-inl.h =====
+#endif  // MXNET_OPERATOR_SOFTMAX_OUTPUT_INL_H_
+//===== EXPANDED: mxnet/src/operator/softmax_output-inl.h =====
 
 
 namespace mxnet {
 namespace op {
 template<>
-Operator *CreateOp<cpu>(SoftmaxParam param) {
-  return new SoftmaxOp<cpu>(param);
+Operator *CreateOp<cpu>(SoftmaxOutputParam param) {
+  return new SoftmaxOutputOp<cpu>(param);
 }
 
-Operator *SoftmaxProp::CreateOperator(Context ctx) const {
+Operator *SoftmaxOutputProp::CreateOperator(Context ctx) const {
   DO_BIND_DISPATCH(CreateOp, param_);
 }
 
-DMLC_REGISTER_PARAMETER(SoftmaxParam);
+DMLC_REGISTER_PARAMETER(SoftmaxOutputParam);
 
-MXNET_REGISTER_OP_PROPERTY(Softmax, SoftmaxProp)
-.describe("Perform a softmax transformation on input.")
+MXNET_REGISTER_OP_PROPERTY(SoftmaxOutput, SoftmaxOutputProp)
+.describe("Perform a softmax transformation on input, backprop with logloss.")
 .add_argument("data", "Symbol", "Input data to softmax.")
-.add_arguments(SoftmaxParam::__FIELDS__());
+.add_arguments(SoftmaxOutputParam::__FIELDS__());
+
+MXNET_REGISTER_OP_PROPERTY(Softmax, DeprecatedSoftmaxProp)
+.describe("DEPRECATED: Perform a softmax transformation on input. Please use SoftmaxOutput")
+.add_argument("data", "Symbol", "Input data to softmax.")
+.add_arguments(SoftmaxOutputParam::__FIELDS__());
 
 }  // namespace op
 }  // namespace mxnet
 
-//===== EXPANDED: mxnet/src/operator/softmax.cc =====
+//===== EXPANDED: mxnet/src/operator/softmax_output.cc =====
+
+//===== EXPANDIND: mxnet/src/operator/deconvolution.cc =====
+
+/*!
+ * Copyright (c) 2015 by Contributors
+ * \file deconvolution.cc
+ * \brief
+ * \author Wei Wu
+*/
+
+//===== EXPANDIND: mxnet/src/operator/deconvolution-inl.h =====
+
+/*!
+ * Copyright (c) 2015 by Contributors
+ * \file deconvolution-inl.h
+ * \brief
+ * \author Wei Wu
+*/
+#ifndef MXNET_OPERATOR_DECONVOLUTION_INL_H_
+#define MXNET_OPERATOR_DECONVOLUTION_INL_H_
+
+
+
+namespace mxnet {
+namespace op {
+
+namespace deconv {
+  enum DeconvolutionOpInputs {kData, kWeight, kBias};
+  enum DeconvolutionOpOutputs {kOut};
+  enum DeconvolutionOpResource {kTempSpace};
+}
+
+struct DeconvolutionParam : public dmlc::Parameter<DeconvolutionParam> {
+  TShape kernel;
+  TShape stride;
+  TShape pad;
+  uint32_t num_filter;
+  uint32_t num_group;
+  uint64_t workspace;
+  bool no_bias;
+  DMLC_DECLARE_PARAMETER(DeconvolutionParam) {
+    int shape[] = {1, 1};
+    DMLC_DECLARE_FIELD(kernel).describe("deconvolution kernel size: (y, x)");
+    DMLC_DECLARE_FIELD(stride).set_default(TShape(shape, shape + 2))
+    .describe("deconvolution stride: (y, x)");
+    shape[0] = shape[1] = 0;
+    DMLC_DECLARE_FIELD(pad).set_default(TShape(shape, shape + 2))
+    .describe("pad for deconvolution: (y, x)");
+    DMLC_DECLARE_FIELD(num_filter).set_range(1, 100000)
+    .describe("deconvolution filter(channel) number");
+    DMLC_DECLARE_FIELD(num_group).set_default(1)
+    .describe("number of groups partition");
+    DMLC_DECLARE_FIELD(workspace).set_default(512).set_range(128, 4096)
+    .describe("Tmp workspace for deconvolution (MB)");
+    DMLC_DECLARE_FIELD(no_bias).set_default(true)
+    .describe("Whether to disable bias parameter.");
+  }
+};
+
+template<typename xpu>
+class DeconvolutionOp : public Operator {
+ public:
+  explicit DeconvolutionOp(DeconvolutionParam p) {
+    this->param_ = p;
+    // convert MB to words
+    param_.workspace = (param_.workspace << 20) / sizeof(real_t);
+  }
+
+  virtual void Forward(const OpContext &ctx,
+                       const std::vector<TBlob> &in_data,
+                       const std::vector<OpReqType> &req,
+                       const std::vector<TBlob> &out_data,
+                       const std::vector<TBlob> &aux_args) {
+    using namespace mshadow;
+    using namespace mshadow::expr;
+    CHECK_EQ(req[deconv::kOut], kWriteTo);
+    size_t expected = param_.no_bias ? 2 : 3;
+    CHECK_EQ(in_data.size(), expected);
+    CHECK_EQ(out_data.size(), 1);
+    Stream<xpu> *s = ctx.get_stream<xpu>();
+    Tensor<xpu, 4> data = in_data[deconv::kData].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> out = out_data[deconv::kOut].get<xpu, 4, real_t>(s);
+    Shape<3> wmat_shape =
+        Shape3(param_.num_group,
+               data.shape_[1] / param_.num_group,
+               param_.num_filter / param_.num_group * param_.kernel[0] * param_.kernel[1]);
+    Tensor<xpu, 3> wmat = in_data[deconv::kWeight].get_with_shape<xpu, 3, real_t>(wmat_shape, s);
+#if defined(__CUDACC__)
+    CHECK_EQ(s->blas_handle_ownership_, Stream<xpu>::OwnHandle)
+        << "Must init CuBLAS handle in stream";
+#endif
+    const index_t nbatch = data.size(0);
+    Tensor<xpu, 1> workspace = ctx.requested[deconv::kTempSpace].get_space<xpu>(
+        Shape1(this->InitTemp(out.shape_, data.shape_)), s);
+    for (index_t i = 0; i < nbatch; i += nstep_) {
+      const index_t step = std::min(nstep_, nbatch - i);
+      Tensor<xpu, 2> temp_col = Tensor<xpu, 2>(workspace.dptr_,
+                                               Shape2(shape_colunit_[0],
+                                                      shape_colunit_[1] * step), s);
+      Tensor<xpu, 3> temp_dst = Tensor<xpu, 3>(workspace.dptr_ + temp_col.shape_.Size(),
+                                               Shape3(shape_dstunit_[0],
+                                                      shape_dstunit_[1],
+                                                      shape_dstunit_[2] * step), s);
+      temp_dst = reshape(swapaxis<1, 0>(data.Slice(i, i + step)), temp_dst.shape_);
+      if (param_.pad[0] == 0 && param_.pad[1] == 0) {
+        temp_col = unpack_patch2col(out.Slice(i, i + step),
+                                    param_.kernel[0],
+                                    param_.kernel[1],
+                                    param_.stride[0],
+                                    param_.stride[1]);
+      } else {
+        temp_col = unpack_patch2col(pad(out.Slice(i, i + step),
+                                        param_.pad[0], param_.pad[1]),
+                                    param_.kernel[0],
+                                    param_.kernel[1],
+                                    param_.stride[0],
+                                    param_.stride[1]);
+      }
+      const index_t gstride = temp_col.size(0) / param_.num_group;
+      for (uint32_t gid = 0; gid < param_.num_group; ++gid) {
+        mshadow::Tensor<xpu, 2> tmpc = temp_col.Slice(gstride * gid,
+                                       gstride * (gid + 1));
+        tmpc = dot(wmat[gid].T(), temp_dst[gid]);
+      }
+      if (param_.pad[0] == 0 && param_.pad[1] == 0) {
+        out.Slice(i, i + step) = pack_col2patch(temp_col,
+                                   out.Slice(i, i + step).shape_,
+                                   param_.kernel[0],
+                                   param_.kernel[1],
+                                   param_.stride[0]);
+      } else {
+        Shape<4> pshape = out.Slice(i, i + step).shape_;
+        pshape[2] += 2 * param_.pad[0];
+        pshape[3] += 2 * param_.pad[1];
+        out.Slice(i, i + step) = crop(pack_col2patch(temp_col,
+                                        pshape,
+                                        param_.kernel[0],
+                                        param_.kernel[1],
+                                        param_.stride[0]),
+                                        out[i][0].shape_);
+      }
+    }
+    if (!param_.no_bias) {
+      // add bias, broadcast bias to dim 1: channel
+      Tensor<xpu, 1> bias = in_data[deconv::kBias].get<xpu, 1, real_t>(s);
+      out += broadcast<1>(bias, out.shape_);
+    }
+  }
+
+  virtual void Backward(const OpContext &ctx,
+                        const std::vector<TBlob> &out_grad,
+                        const std::vector<TBlob> &in_data,
+                        const std::vector<TBlob> &out_data,
+                        const std::vector<OpReqType> &req,
+                        const std::vector<TBlob> &in_grad,
+                        const std::vector<TBlob> &aux_args) {
+    using namespace mshadow;
+    using namespace mshadow::expr;
+    // TODO(bing): check the BLAS Handle, be careful
+    CHECK_EQ(out_grad.size(), 1);
+    size_t expected = param_.no_bias == 0 ? 3 : 2;
+    CHECK(in_data.size() == expected && in_grad.size() == expected);
+    CHECK_EQ(req.size(), expected);
+    CHECK_EQ(in_data[deconv::kWeight].CheckContiguous(), true);
+    // get data
+    Stream<xpu> *s = ctx.get_stream<xpu>();
+    Tensor<xpu, 4> data = in_data[deconv::kData].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> grad = out_grad[deconv::kOut].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gdata = in_grad[deconv::kData].get<xpu, 4, real_t>(s);
+    Shape<3> wmat_shape =
+        Shape3(param_.num_group,
+               data.shape_[1] / param_.num_group,
+               param_.num_filter / param_.num_group * param_.kernel[0] * param_.kernel[1]);
+    Tensor<xpu, 3> wmat = in_data[deconv::kWeight].get_with_shape<xpu, 3, real_t>(wmat_shape, s);
+    Tensor<xpu, 3> gwmat = in_grad[deconv::kWeight].get_with_shape<xpu, 3, real_t>(wmat_shape, s);
+#if defined(__CUDACC__)
+    CHECK_EQ(s->blas_handle_ownership_, Stream<xpu>::OwnHandle)
+        << "Must init CuBLAS handle in stream";
+#endif
+    const index_t nbatch = data.size(0);
+    Tensor<xpu, 1> workspace = ctx.requested[deconv::kTempSpace].get_space<xpu>(
+              Shape1(this->InitTemp(grad.shape_, data.shape_)), s);
+    for (index_t i = 0; i < nbatch; i += nstep_) {
+      const index_t step = std::min(nstep_, nbatch - i);
+      Tensor<xpu, 2> temp_col = Tensor<xpu, 2>(workspace.dptr_,
+                                               Shape2(shape_colunit_[0],
+                                                      shape_colunit_[1] * step), s);
+      Tensor<xpu, 3> temp_dst = Tensor<xpu, 3>(workspace.dptr_ + temp_col.shape_.Size(),
+                                               Shape3(shape_dstunit_[0],
+                                                      shape_dstunit_[1],
+                                                      shape_dstunit_[2] * step), s);
+      temp_dst = reshape(swapaxis<1, 0>(data.Slice(i, i + step)), temp_dst.shape_);
+      if (param_.pad[0] == 0 && param_.pad[1] == 0) {
+        temp_col = unpack_patch2col(grad.Slice(i, i + step),
+                                     param_.kernel[0],
+                                     param_.kernel[1],
+                                     param_.stride[0],
+                                     param_.stride[1]);
+      } else {
+        temp_col = unpack_patch2col(pad(grad.Slice(i, i + step), param_.pad[0], param_.pad[1]),
+                                     param_.kernel[0],
+                                     param_.kernel[1],
+                                     param_.stride[0],
+                                     param_.stride[1]);
+      }
+      const index_t gstride = temp_col.size(0) / param_.num_group;
+      for (uint32_t gid = 0; gid < param_.num_group; ++gid) {
+        Tensor<xpu, 2> tmpc = temp_col.Slice(gstride * gid, gstride * (gid + 1));
+        if (i == 0) {
+          Tensor<xpu, 2> tmp_gwmat = gwmat[gid];
+          Assign(tmp_gwmat, req[deconv::kWeight], dot(temp_dst[gid], tmpc.T()));
+        } else {
+          gwmat[gid] += dot(temp_dst[gid], tmpc.T());
+        }
+      }
+      if (req[deconv::kData] == kWriteTo || req[deconv::kData] == kWriteInplace) {
+        for (uint32_t gid = 0; gid < param_.num_group; ++gid) {
+          Tensor<xpu, 2> tmpc = temp_col.Slice(gstride * gid, gstride * (gid + 1));
+          temp_dst[gid] = dot(wmat[gid], tmpc);
+        }
+        gdata.Slice(i, i + step) = swapaxis<1, 0>(reshape(temp_dst,
+                                                    mshadow::Shape4(gdata.shape_[1],
+                                                    step,
+                                                    gdata.size(2),
+                                                    gdata.size(3))));
+      }
+    }
+    if (!param_.no_bias) {
+      Tensor<xpu, 1> gbias = in_grad[deconv::kBias].get<xpu, 1, real_t>(s);
+      Assign(gbias, req[deconv::kBias], sumall_except_dim<1>(grad));
+    }
+  }
+
+ private:
+  inline index_t InitTemp(const mshadow::Shape<4> &ishape,
+                          const mshadow::Shape<4> &oshape) {
+    const int ksize_y = param_.kernel[0];
+    const int ksize_x = param_.kernel[1];
+    shape_colunit_ = mshadow::Shape2(ishape[1] * ksize_y * ksize_x,
+                                     oshape[2] * oshape[3]);
+    shape_dstunit_ = mshadow::Shape3(param_.num_group,
+                                     oshape[1] / param_.num_group,
+                                     oshape[2] * oshape[3]);
+    const uint64_t workspace_size = param_.workspace;
+    nstep_ = std::max(std::min(static_cast<index_t>(workspace_size / shape_colunit_.Size()),
+                               ishape[0]), 1U);
+    int nop = (ishape[0] + nstep_ - 1) / nstep_;
+    nstep_ = (ishape[0] + nop - 1) / nop;
+    mshadow::Shape<2> scol = mshadow::Shape2(shape_colunit_[0],
+                                             shape_colunit_[1] * nstep_);
+    mshadow::Shape<3> sdst = mshadow::Shape3(shape_dstunit_[0],
+                                             shape_dstunit_[1],
+                                             shape_dstunit_[2] * nstep_);
+    CHECK_GE(param_.workspace, scol.Size() + sdst.Size())
+      << "\nMinimum workspace size: " << scol.Size() + sdst.Size() << "\n"
+      << "Given: " << param_.workspace;
+    return scol.Size() + sdst.Size();
+  }
+
+  DeconvolutionParam param_;
+  mshadow::Shape<2> shape_colunit_;
+  mshadow::Shape<3> shape_dstunit_;
+  index_t nstep_;
+};  // class DeconvolutionOp
+
+template<typename xpu>
+Operator* CreateOp(DeconvolutionParam param);
+
+#if DMLC_USE_CXX11
+class DeconvolutionProp : public OperatorProperty {
+ public:
+  std::vector<std::string> ListArguments() const override {
+    if (!param_.no_bias) {
+      return {"data", "weight", "bias"};
+    } else {
+      return {"data", "weight"};
+    }
+  }
+
+  void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
+    param_.Init(kwargs);
+  }
+
+  std::map<std::string, std::string> GetParams() const override {
+    return param_.__DICT__();
+  }
+
+  bool InferShape(std::vector<TShape> *in_shape,
+                  std::vector<TShape> *out_shape,
+                  std::vector<TShape> *aux_shape) const override {
+    using namespace mshadow;
+    if (!param_.no_bias) {
+      CHECK_EQ(in_shape->size(), 3) << "Input:[data, weight, bias]";
+    } else {
+      CHECK_EQ(in_shape->size(), 2) << "Input:[data, weight]";
+    }
+    const TShape &dshape = (*in_shape)[deconv::kData];
+    if (dshape.ndim() ==  0) return false;
+    CHECK_EQ(dshape.ndim(), 4) \
+        << "Input data should be 4D in batch-num_filter-y-x";
+    SHAPE_ASSIGN_CHECK(*in_shape,
+                       deconv::kWeight,
+                       Shape4(dshape[1], param_.num_filter, param_.kernel[0], param_.kernel[1]));
+    if (!param_.no_bias) {
+      SHAPE_ASSIGN_CHECK(*in_shape, deconv::kBias, Shape1(param_.num_filter));
+    }
+    out_shape->clear();
+    out_shape->push_back(dshape);
+    const index_t ksize_y = static_cast<index_t>(param_.kernel[0]);
+    const index_t ksize_x = static_cast<index_t>(param_.kernel[1]);
+    CHECK_EQ(dshape[1] % param_.num_group, 0) \
+        << "input num_filter must divide group size";
+    CHECK_EQ(param_.num_filter % param_.num_group, 0) \
+        << "output num_filter must divide group size";
+    CHECK_GE(param_.kernel.Size(), 0) \
+        << "incorrect kernel size: " << param_.kernel;
+    CHECK_GE(param_.stride.Size(), 0) \
+        << "incorrect stride size: " << param_.stride;
+    CHECK(ksize_x <= dshape[3] && ksize_y <= dshape[2])
+        << "kernel size exceed input";
+    (*out_shape)[deconv::kOut][1] = param_.num_filter;
+    (*out_shape)[deconv::kOut][2] = param_.stride[0] * (dshape[2] - 1) +
+        ksize_y - 2 * param_.pad[0];
+    (*out_shape)[deconv::kOut][3] = param_.stride[1] * (dshape[3] - 1) +
+        ksize_x - 2 * param_.pad[1];
+    return true;
+  }
+
+  OperatorProperty* Copy() const override {
+    auto ptr = new DeconvolutionProp();
+    ptr->param_ = param_;
+    return ptr;
+  }
+
+  std::string TypeString() const override {
+    return "Deconvolution";
+  }
+
+  std::vector<int> DeclareBackwardDependency(
+    const std::vector<int> &out_grad,
+    const std::vector<int> &in_data,
+    const std::vector<int> &out_data) const override {
+    return {out_grad[deconv::kOut], in_data[deconv::kData], in_data[deconv::kWeight]};
+  }
+
+  std::vector<ResourceRequest> ForwardResource(
+      const std::vector<TShape> &in_shape) const override {
+    return {ResourceRequest::kTempSpace};
+  }
+
+  std::vector<ResourceRequest> BackwardResource(
+      const std::vector<TShape> &in_shape) const override {
+    return {ResourceRequest::kTempSpace};
+  }
+
+  Operator* CreateOperator(Context ctx) const;
+
+ private:
+  DeconvolutionParam param_;
+};  // class DeconvolutionProp
+#endif  // DMLC_USE_CXX11
+}  // namespace op
+}  // namespace mxnet
+#endif  // MXNET_OPERATOR_DECONVOLUTION_INL_H_
+//===== EXPANDED: mxnet/src/operator/deconvolution-inl.h =====
+
+
+namespace mxnet {
+namespace op {
+template<>
+Operator* CreateOp<cpu>(DeconvolutionParam param) {
+  return new DeconvolutionOp<cpu>(param);
+}
+
+Operator* DeconvolutionProp::CreateOperator(Context ctx) const {
+  DO_BIND_DISPATCH(CreateOp, param_);
+}
+
+DMLC_REGISTER_PARAMETER(DeconvolutionParam);
+
+MXNET_REGISTER_OP_PROPERTY(Deconvolution, DeconvolutionProp)
+.add_argument("data", "Symbol", "Input data to the DeconvolutionOp.")
+.add_argument("weight", "Symbol", "Weight matrix.")
+.add_argument("bias", "Symbol", "Bias parameter.")
+.add_arguments(DeconvolutionParam::__FIELDS__())
+.describe("Apply deconvolution to input then add a bias.");
+
+}  // namespace op
+}  // namespace mxnet
+//===== EXPANDED: mxnet/src/operator/deconvolution.cc =====
+
+//===== EXPANDIND: mxnet/src/operator/native_op.cc =====
+
+/*!
+ * Copyright (c) 2015 by Contributors
+ * \file native_op.cc
+ * \brief
+ * \author Junyuan Xie
+*/
+//===== EXPANDIND: mxnet/src/operator/native_op-inl.h =====
+
+/*!
+ * Copyright (c) 2015 by Contributors
+ * \file native_op-inl.h
+ * \brief
+ * \author Junyuan Xie
+*/
+
+#ifndef MXNET_OPERATOR_NATIVE_OP_INL_H_
+#define MXNET_OPERATOR_NATIVE_OP_INL_H_
+//===== EXPANDIND: mxnet/include/mxnet/c_api.h =====
+
+/*!
+ *  Copyright (c) 2015 by Contributors
+ * \file c_api.h
+ * \brief C API of mxnet
+ */
+#ifndef MXNET_C_API_H_
+#define MXNET_C_API_H_
+
+#ifdef __cplusplus
+#define MXNET_EXTERN_C extern "C"
+#endif
+
+/*! \brief MXNET_DLL prefix for windows" */
+#ifdef _WIN32
+#ifdef MXNET_EXPORTS
+#define MXNET_DLL MXNET_EXTERN_C __declspec(dllexport)
+#else
+#define MXNET_DLL MXNET_EXTERN_C __declspec(dllimport)
+#endif
+#else
+#define MXNET_DLL MXNET_EXTERN_C
+#endif
+
+/*! \brief manually define unsigned int */
+typedef unsigned int mx_uint;
+/*! \brief manually define unsigned int */
+typedef float mx_float;
+// all the handles are simply void *
+// will be casted internally to specific pointers types
+// these typedefs are mainly used for readablity reasons
+/*! \brief handle to NDArray */
+typedef void *NDArrayHandle;
+/*! \brief handle to a mxnet narray function that changes NDArray */
+typedef const void *FunctionHandle;
+/*! \brief handle to a function that takes param and creates symbol */
+typedef void *AtomicSymbolCreator;
+/*! \brief handle to a symbol that can be bind as operator */
+typedef void *SymbolHandle;
+/*! \brief handle to a AtomicSymbol */
+typedef void *AtomicSymbolHandle;
+/*! \brief handle to an Executor */
+typedef void *ExecutorHandle;
+/*! \brief handle a dataiter creator */
+typedef void *DataIterCreator;
+/*! \brief handle to a DataIterator */
+typedef void *DataIterHandle;
+/*! \brief handle to KVStore */
+typedef void *KVStoreHandle;
+/*! \brief handle to RecordIO */
+typedef void *RecordIOHandle;
+
+MXNET_EXTERN_C {
+struct NativeOpInfo {
+  void (*forward)(int, float**, int*, unsigned**, int*);
+  void (*backward)(int, float**, int*, unsigned**, int*);
+  void (*infer_shape)(int, int*, unsigned**);
+  void (*list_outputs)(char***);
+  void (*list_arguments)(char***);
+};
+}
+/*!
+ * \brief return str message of the last error
+ *  all function in this file will return 0 when success
+ *  and -1 when an error occured,
+ *  MXGetLastError can be called to retrieve the error
+ *
+ *  this function is threadsafe and can be called by different thread
+ *  \return error info
+ */
+MXNET_DLL const char *MXGetLastError();
+
+//-------------------------------------
+// Part 0: Global State setups
+//-------------------------------------
+/*!
+ * \brief Seed the global random number generators in mxnet.
+ * \param seed the random number seed.
+ * \return 0 when success, -1 when failure happens.
+ */
+MXNET_DLL int MXRandomSeed(int seed);
+/*!
+ * \brief Notify the engine about a shutdown,
+ *  This can help engine to print less messages into display.
+ *
+ *  User do not have to call this function.
+ * \return 0 when success, -1 when failure happens.
+ */
+MXNET_DLL int MXNotifyShutdown();
+//-------------------------------------
+// Part 1: NDArray creation and deletion
+//-------------------------------------
+/*!
+ * \brief create a NDArray handle that is not initialized
+ *  can be used to pass in as mutate variables
+ *  to hold the result of NDArray
+ * \param out the returning handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayCreateNone(NDArrayHandle *out);
+/*!
+ * \brief create a NDArray with specified shape
+ * \param shape the pointer to the shape
+ * \param ndim the dimension of the shape
+ * \param dev_type device type, specify device we want to take
+ * \param dev_id the device id of the specific device
+ * \param delay_alloc whether to delay allocation until
+ *    the narray is first mutated
+ * \param out the returning handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayCreate(const mx_uint *shape,
+                              mx_uint ndim,
+                              int dev_type,
+                              int dev_id,
+                              int delay_alloc,
+                              NDArrayHandle *out);
+/*!
+ * \brief create a NDArray handle that is loaded from raw bytes.
+ * \param buf the head of the raw bytes
+ * \param size size of the raw bytes
+ * \param out the returning handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayLoadFromRawBytes(const void *buf,
+                                        size_t size,
+                                        NDArrayHandle *out);
+/*!
+ * \brief save the NDArray into raw bytes.
+ * \param handle the NDArray handle
+ * \param out_size size of the raw bytes
+ * \param out_buf the head of returning memory bytes.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArraySaveRawBytes(NDArrayHandle handle,
+                                    size_t *out_size,
+                                    const char **out_buf);
+/*!
+ * \brief Save list of narray into the file.
+ * \param fname name of the file.
+ * \param num_args number of arguments to save.
+ * \param args the array of NDArrayHandles to be saved.
+ * \param keys the name of the NDArray, optional, can be NULL
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArraySave(const char* fname,
+                            mx_uint num_args,
+                            NDArrayHandle* args,
+                            const char** keys);
+/*!
+ * \brief Load list of narray from the file.
+ * \param fname name of the file.
+ * \param out_size number of narray loaded.
+ * \param out_arr head of the returning narray handles.
+ * \param out_name_size size of output name arrray.
+ * \param out_names the names of returning NDArrays, can be NULL
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayLoad(const char* fname,
+                            mx_uint *out_size,
+                            NDArrayHandle** out_arr,
+                            mx_uint *out_name_size,
+                            const char*** out_names);
+/*!
+ * \brief Perform a synchronize copy from a continugous CPU memory region.
+ *
+ *  This function will call WaitToWrite before the copy is performed.
+ *  This is useful to copy data from existing memory region that are
+ *  not wrapped by NDArray(thus dependency not being tracked).
+ *
+ * \param handle the NDArray handle
+ * \param data the data source to copy from.
+ * \param size the memory size we want to copy from.
+ */
+MXNET_DLL int MXNDArraySyncCopyFromCPU(NDArrayHandle handle,
+                                       const mx_float *data,
+                                       size_t size);
+/*!
+ * \brief Perform a synchronize copyto a continugous CPU memory region.
+ *
+ *  This function will call WaitToRead before the copy is performed.
+ *  This is useful to copy data from existing memory region that are
+ *  not wrapped by NDArray(thus dependency not being tracked).
+ *
+ * \param handle the NDArray handle
+ * \param data the data source to copy into.
+ * \param size the memory size we want to copy into.
+ */
+MXNET_DLL int MXNDArraySyncCopyToCPU(NDArrayHandle handle,
+                                     mx_float *data,
+                                     size_t size);
+/*!
+ * \brief Wait until all the pending writes with respect NDArray are finished.
+ *  Always call this before read data out synchronizely.
+ * \param handle the NDArray handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayWaitToRead(NDArrayHandle handle);
+/*!
+ * \brief Wait until all the pending read/write with respect NDArray are finished.
+ *  Always call this before write data into NDArray synchronizely.
+ * \param handle the NDArray handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayWaitToWrite(NDArrayHandle handle);
+/*!
+ * \brief wait until all delayed operations in
+ *   the system is completed
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayWaitAll();
+/*!
+ * \brief free the narray handle
+ * \param handle the handle to be freed
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayFree(NDArrayHandle handle);
+/*!
+ * \brief Slice the NDArray along axis 0.
+ * \param handle the handle to the narraya
+ * \param slice_begin The beginning index of slice
+ * \param slice_end The ending index of slice
+ * \param out The NDArrayHandle of sliced NDArray
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArraySlice(NDArrayHandle handle,
+                             mx_uint slice_begin,
+                             mx_uint slice_end,
+                             NDArrayHandle *out);
+/*!
+ * \brief get the shape of the array
+ * \param handle the handle to the narray
+ * \param out_dim the output dimension
+ * \param out_pdata pointer holder to get data pointer of the shape
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayGetShape(NDArrayHandle handle,
+                                mx_uint *out_dim,
+                                const mx_uint **out_pdata);
+/*!
+ * \brief get the content of the data in NDArray
+ * \param handle the handle to the narray
+ * \param out_pdata pointer holder to get pointer of data
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayGetData(NDArrayHandle handle,
+                               mx_float **out_pdata);
+/*!
+ * \brief get the context of the NDArray
+ * \param handle the handle to the narray
+ * \param out_dev_type the output device type
+ * \param out_dev_id the output device id
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXNDArrayGetContext(NDArrayHandle handle,
+                                  int *out_dev_type,
+                                  int *out_dev_id);
+
+//--------------------------------
+// Part 2: functions on NDArray
+//--------------------------------
+/*!
+ * \brief list all the available functions handles
+ *   most user can use it to list all the needed functions
+ * \param out_size the size of returned array
+ * \param out_array the output function array
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXListFunctions(mx_uint *out_size,
+                              FunctionHandle **out_array);
+/*!
+ * \brief get the function handle by name
+ * \param name the name of the function
+ * \param out the corresponding function handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXGetFunction(const char *name,
+                            FunctionHandle *out);
+/*!
+ * \brief Get the information of the function handle.
+ * \param fun The function handle.
+ * \param name The returned name of the function.
+ * \param description The returned description of the function.
+ * \param num_args Number of arguments.
+ * \param arg_names Name of the arguments.
+ * \param arg_type_infos Type informations about the arguments.
+ * \param arg_descriptions Description information about the arguments.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXFuncGetInfo(FunctionHandle fun,
+                            const char **name,
+                            const char **description,
+                            mx_uint *num_args,
+                            const char ***arg_names,
+                            const char ***arg_type_infos,
+                            const char ***arg_descriptions);
+/*!
+ * \brief get the argument requirements of the function
+ * \param fun input function handle
+ * \param num_use_vars how many NDArrays to be passed in as used_vars
+ * \param num_scalars scalar variable is needed
+ * \param num_mutate_vars how many NDArrays to be passed in as mutate_vars
+ * \param type_mask the type mask of this function
+ * \return 0 when success, -1 when failure happens
+ * \sa MXFuncInvoke
+ */
+MXNET_DLL int MXFuncDescribe(FunctionHandle fun,
+                             mx_uint *num_use_vars,
+                             mx_uint *num_scalars,
+                             mx_uint *num_mutate_vars,
+                             int *type_mask);
+/*!
+ * \brief invoke a function, the array size of passed in arguments
+ *   must match the values in the
+ * \param fun the function
+ * \param use_vars the normal arguments passed to function
+ * \param scalar_args the scalar qarguments
+ * \param mutate_vars the mutate arguments
+ * \return 0 when success, -1 when failure happens
+ * \sa MXFuncDescribeArgs
+ */
+MXNET_DLL int MXFuncInvoke(FunctionHandle fun,
+                           NDArrayHandle *use_vars,
+                           mx_float *scalar_args,
+                           NDArrayHandle *mutate_vars);
+
+//--------------------------------------------
+// Part 3: symbolic configuration generation
+//--------------------------------------------
+/*!
+ * \brief list all the available AtomicSymbolEntry
+ * \param out_size the size of returned array
+ * \param out_array the output AtomicSymbolCreator array
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolListAtomicSymbolCreators(mx_uint *out_size,
+                                               AtomicSymbolCreator **out_array);
+/*!
+ * \brief Get the detailed information about atomic symbol.
+ * \param creator the AtomicSymbolCreator.
+ * \param name The returned name of the creator.
+ * \param description The returned description of the symbol.
+ * \param num_args Number of arguments.
+ * \param arg_names Name of the arguments.
+ * \param arg_type_infos Type informations about the arguments.
+ * \param arg_descriptions Description information about the arguments.
+ * \param key_var_num_args The keyword argument for specifying variable number of arguments.
+ *            When this parameter has non-zero length, the function allows variable number
+ *            of positional arguments, and will need the caller to pass it in in
+ *            MXSymbolCreateAtomicSymbol,
+ *            With key = key_var_num_args, and value = number of positional arguments.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolGetAtomicSymbolInfo(AtomicSymbolCreator creator,
+                                          const char **name,
+                                          const char **description,
+                                          mx_uint *num_args,
+                                          const char ***arg_names,
+                                          const char ***arg_type_infos,
+                                          const char ***arg_descriptions,
+                                          const char **key_var_num_args);
+/*!
+ * \brief Create an AtomicSymbol.
+ * \param creator the AtomicSymbolCreator
+ * \param num_param the number of parameters
+ * \param keys the keys to the params
+ * \param vals the vals of the params
+ * \param out pointer to the created symbol handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCreateAtomicSymbol(AtomicSymbolCreator creator,
+                                         mx_uint num_param,
+                                         const char **keys,
+                                         const char **vals,
+                                         SymbolHandle *out);
+/*!
+ * \brief Create a Variable Symbol.
+ * \param name name of the variable
+ * \param out pointer to the created symbol handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCreateVariable(const char *name, SymbolHandle *out);
+/*!
+ * \brief Create a Symbol by grouping list of symbols together
+ * \param num_symbols number of symbols to be grouped
+ * \param symbols array of symbol handles
+ * \param out pointer to the created symbol handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCreateGroup(mx_uint num_symbols,
+                                  SymbolHandle *symbols,
+                                  SymbolHandle *out);
+/*!
+ * \brief Load a symbol from a json file.
+ * \param fname the file name.
+ * \param out the output symbol.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCreateFromFile(const char *fname, SymbolHandle *out);
+/*!
+ * \brief Load a symbol from a json string.
+ * \param json the json string.
+ * \param out the output symbol.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCreateFromJSON(const char *json, SymbolHandle *out);
+/*!
+ * \brief Save a symbol into a json file.
+ * \param symbol the input symbol.
+ * \param fname the file name.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolSaveToFile(SymbolHandle symbol, const char *fname);
+/*!
+ * \brief Save a symbol into a json string
+ * \param symbol the input symbol.
+ * \param out_json output json string.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolSaveToJSON(SymbolHandle symbol, const char **out_json);
+/*!
+ * \brief Free the symbol handle.
+ * \param symbol the symbol
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolFree(SymbolHandle symbol);
+/*!
+ * \brief Copy the symbol to another handle
+ * \param symbol the source symbol
+ * \param out used to hold the result of copy
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCopy(SymbolHandle symbol, SymbolHandle *out);
+/*!
+ * \brief Print the content of symbol, used for debug.
+ * \param symbol the symbol
+ * \param out_str pointer to hold the output string of the printing.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolPrint(SymbolHandle symbol, const char **out_str);
+/*!
+ * \brief List arguments in the symbol.
+ * \param symbol the symbol
+ * \param out_size output size
+ * \param out_str_array pointer to hold the output string array
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolListArguments(SymbolHandle symbol,
+                                    mx_uint *out_size,
+                                    const char ***out_str_array);
+/*!
+ * \brief List returns in the symbol.
+ * \param symbol the symbol
+ * \param out_size output size
+ * \param out_str_array pointer to hold the output string array
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolListOutputs(SymbolHandle symbol,
+                                  mx_uint *out_size,
+                                  const char ***out_str_array);
+/*!
+ * \brief Get a symbol that contains all the internals.
+ * \param symbol The symbol
+ * \param out The output symbol whose outputs are all the internals.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolGetInternals(SymbolHandle symbol,
+                                   SymbolHandle *out);
+/*!
+ * \brief Get index-th outputs of the symbol.
+ * \param symbol The symbol
+ * \param index the Index of the output.
+ * \param out The output symbol whose outputs are the index-th symbol.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolGetOutput(SymbolHandle symbol,
+                                mx_uint index,
+                                SymbolHandle *out);
+/*!
+ * \brief List auxiliary states in the symbol.
+ * \param symbol the symbol
+ * \param out_size output size
+ * \param out_str_array pointer to hold the output string array
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolListAuxiliaryStates(SymbolHandle symbol,
+                                          mx_uint *out_size,
+                                          const char ***out_str_array);
+/*!
+ * \brief Compose the symbol on other symbols.
+ *
+ *  This function will change the sym hanlde.
+ *  To achieve function apply behavior, copy the symbol first
+ *  before apply.
+ *
+ * \param sym the symbol to apply
+ * \param name the name of symbol
+ * \param num_args number of arguments
+ * \param keys the key of keyword args (optional)
+ * \param args arguments to sym
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolCompose(SymbolHandle sym,
+                              const char *name,
+                              mx_uint num_args,
+                              const char** keys,
+                              SymbolHandle* args);
+/*!
+ * \brief Get the gradient graph of the symbol
+ *
+ * \param sym the symbol to get gradient
+ * \param num_wrt number of arguments to get gradient
+ * \param wrt the name of the arguments to get gradient
+ * \param out the returned symbol that has gradient
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolGrad(SymbolHandle sym,
+                           mx_uint num_wrt,
+                           const char** wrt,
+                           SymbolHandle* out);
+/*!
+ * \brief infer shape of unknown input shapes given the known one.
+ *  The shapes are packed into a CSR matrix represented by arg_ind_ptr and arg_shape_data
+ *  The call will be treated as a kwargs call if key != nullptr or num_args==0, otherwise it is positional.
+ *
+ * \param sym symbol handle
+ * \param num_args numbe of input arguments.
+ * \param keys the key of keyword args (optional)
+ * \param arg_ind_ptr the head pointer of the rows in CSR
+ * \param arg_shape_data the content of the CSR
+ * \param in_shape_size sizeof the returning array of in_shapes
+ * \param in_shape_ndim returning array of shape dimensions of eachs input shape.
+ * \param in_shape_data returning array of pointers to head of the input shape.
+ * \param out_shape_size sizeof the returning array of out_shapes
+ * \param out_shape_ndim returning array of shape dimensions of eachs input shape.
+ * \param out_shape_data returning array of pointers to head of the input shape.
+ * \param aux_shape_size sizeof the returning array of aux_shapes
+ * \param aux_shape_ndim returning array of shape dimensions of eachs auxiliary shape.
+ * \param aux_shape_data returning array of pointers to head of the auxiliary shape.
+ * \param complete whether infer shape completes or more information is needed.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXSymbolInferShape(SymbolHandle sym,
+                                 mx_uint num_args,
+                                 const char** keys,
+                                 const mx_uint *arg_ind_ptr,
+                                 const mx_uint *arg_shape_data,
+                                 mx_uint *in_shape_size,
+                                 const mx_uint **in_shape_ndim,
+                                 const mx_uint ***in_shape_data,
+                                 mx_uint *out_shape_size,
+                                 const mx_uint **out_shape_ndim,
+                                 const mx_uint ***out_shape_data,
+                                 mx_uint *aux_shape_size,
+                                 const mx_uint **aux_shape_ndim,
+                                 const mx_uint ***aux_shape_data,
+                                 int *complete);
+//--------------------------------------------
+// Part 4: Executor interface
+//--------------------------------------------
+/*!
+ * \brief Delete the executor
+ * \param handle the executor.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorFree(ExecutorHandle handle);
+/*!
+ * \brief Print the content of execution plan, used for debug.
+ * \param handle the executor.
+ * \param out_str pointer to hold the output string of the printing.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorPrint(ExecutorHandle handle, const char **out_str);
+/*!
+ * \brief Executor forward method
+ *
+ * \param handle executor handle
+ * \param is_train bool value to indicate whether the forward pass is for evaluation
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorForward(ExecutorHandle handle, int is_train);
+/*!
+ * \brief Excecutor run backward
+ *
+ * \param handle execute handle
+ * \param len lenth
+ * \param head_grads NDArray handle for heads' gradient
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorBackward(ExecutorHandle handle,
+                                 mx_uint len,
+                                 NDArrayHandle *head_grads);
+
+/*!
+ * \brief Get executor's head NDArray
+ *
+ * \param handle executor handle
+ * \param out_size output narray vector size
+ * \param out out put narray handles
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorOutputs(ExecutorHandle handle,
+                                mx_uint *out_size,
+                                NDArrayHandle **out);
+
+/*!
+ * \brief Generate Executor from symbol
+ *
+ * \param symbol_handle symbol handle
+ * \param dev_type device type
+ * \param dev_id device id
+ * \param len length
+ * \param in_args in args array
+ * \param arg_grad_store arg grads handle array
+ * \param grad_req_type grad req array
+ * \param aux_states_len length of auxiliary states
+ * \param aux_states auxiliary states array
+ * \param out output executor handle
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXExecutorBind(SymbolHandle symbol_handle,
+                             int dev_type,
+                             int dev_id,
+                             mx_uint len,
+                             NDArrayHandle *in_args,
+                             NDArrayHandle *arg_grad_store,
+                             mx_uint *grad_req_type,
+                             mx_uint aux_states_len,
+                             NDArrayHandle *aux_states,
+                             ExecutorHandle *out);
+
+//--------------------------------------------
+// Part 5: IO Interface
+//--------------------------------------------
+/*!
+ * \brief List all the available iterator entries
+ * \param out_size the size of returned iterators
+ * \param out_array the output iteratos entries
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXListDataIters(mx_uint *out_size,
+                              DataIterCreator **out_array);
+/*!
+ * \brief Init an iterator, init with parameters
+ * the array size of passed in arguments
+ * \param handle of the iterator creator
+ * \param num_param number of parameter
+ * \param keys parameter keys
+ * \param vals parameter values
+ * \param out resulting iterator
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterCreateIter(DataIterCreator handle,
+                                   mx_uint num_param,
+                                   const char **keys,
+                                   const char **vals,
+                                   DataIterHandle *out);
+/*!
+ * \brief Get the detailed information about data iterator.
+ * \param creator the DataIterCreator.
+ * \param name The returned name of the creator.
+ * \param description The returned description of the symbol.
+ * \param num_args Number of arguments.
+ * \param arg_names Name of the arguments.
+ * \param arg_type_infos Type informations about the arguments.
+ * \param arg_descriptions Description information about the arguments.
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterGetIterInfo(DataIterCreator creator,
+                                    const char **name,
+                                    const char **description,
+                                    mx_uint *num_args,
+                                    const char ***arg_names,
+                                    const char ***arg_type_infos,
+                                    const char ***arg_descriptions);
+/*!
+ * \brief Free the handle to the IO module
+ * \param handle the handle pointer to the data iterator
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterFree(DataIterHandle handle);
+/*!
+ * \brief Move iterator to next position
+ * \param handle the handle to iterator
+ * \param out return value of next
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterNext(DataIterHandle handle,
+                             int *out);
+/*!
+ * \brief Call iterator.Reset
+ * \param handle the handle to iterator
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterBeforeFirst(DataIterHandle handle);
+
+/*!
+ * \brief Get the handle to the NDArray of underlying data
+ * \param handle the handle pointer to the data iterator
+ * \param out handle to underlying data NDArray
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterGetData(DataIterHandle handle,
+                                NDArrayHandle *out);
+
+/*!
+ * \brief Get the padding number in current data batch
+ * \param handle the handle pointer to the data iterator
+ * \param pad pad number ptr
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterGetPadNum(DataIterHandle handle,
+                                  int *pad);
+
+/*!
+ * \brief Get the handle to the NDArray of underlying label
+ * \param handle the handle pointer to the data iterator
+ * \param out the handle to underlying label NDArray
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXDataIterGetLabel(DataIterHandle handle,
+                                 NDArrayHandle *out);
+//--------------------------------------------
+// Part 5: basic KVStore interface
+//--------------------------------------------
+/*!
+ * \brief Create a kvstore
+ * \param type the type of KVStore
+ * \param out The output type of KVStore
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreCreate(const char *type,
+                              KVStoreHandle *out);
+/*!
+ * \brief Delete a KVStore handle.
+ * \param handle handle to the kvstore
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreFree(KVStoreHandle handle);
+/*!
+ * \brief Init a list of (key,value) pairs in kvstore
+ * \param handle handle to the kvstore
+ * \param num the number of key-value pairs
+ * \param keys the list of keys
+ * \param vals the list of values
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreInit(KVStoreHandle handle,
+                            mx_uint num,
+                            const int* keys,
+                            NDArrayHandle* vals);
+
+/*!
+ * \brief Push a list of (key,value) pairs to kvstore
+ * \param handle handle to the kvstore
+ * \param num the number of key-value pairs
+ * \param keys the list of keys
+ * \param vals the list of values
+ * \param priority the priority of the action
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStorePush(KVStoreHandle handle,
+                            mx_uint num,
+                            const int* keys,
+                            NDArrayHandle* vals,
+                            int priority);
+/*!
+ * \brief pull a list of (key, value) pairs from the kvstore
+ * \param handle handle to the kvstore
+ * \param num the number of key-value pairs
+ * \param keys the list of keys
+ * \param vals the list of values
+ * \param priority the priority of the action
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStorePull(KVStoreHandle handle,
+                            mx_uint num,
+                            const int* keys,
+                            NDArrayHandle* vals,
+                            int priority);
+/*!
+ * \brief user-defined updater for the kvstore
+ * It's this updater's responsibility to delete \a recv and \a local
+ * \param the key
+ * \param recv the pushed value on this key
+ * \param local the value stored on local on this key
+ * \param handle The additional handle to the updater
+ */
+typedef void (MXKVStoreUpdater)(int key,
+                                NDArrayHandle recv,
+                                NDArrayHandle local,
+                                void *handle);
+/*!
+ * \brief register an push updater
+ * \param handle handle to the KVStore
+ * \param updater udpater function
+ * \param updater_handle The additional handle used to invoke the updater
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreSetUpdater(KVStoreHandle handle,
+                                  MXKVStoreUpdater updater,
+                                  void *updater_handle);
+/*!
+ * \brief get the type of the kvstore
+ * \param handle handle to the KVStore
+ * \param type a string type
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreGetType(KVStoreHandle handle,
+                               const char** type);
+//--------------------------------------------
+// Part 6: advanced KVStore for multi-machines
+//--------------------------------------------
+
+/**
+ * \brief return The rank of this node in its group, which is in [0, GroupSize).
+ *
+ * \param handle handle to the KVStore
+ * \param ret the node rank
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreGetRank(KVStoreHandle handle,
+                               int *ret);
+
+/**
+ * \brief return The number of nodes in this group, which is
+ * - number of workers if if `IsWorkerNode() == true`,
+ * - number of servers if if `IsServerNode() == true`,
+ * - 1 if `IsSchedulerNode() == true`,
+ * \param handle handle to the KVStore
+ * \param ret the group size
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreGetGroupSize(KVStoreHandle handle,
+                                    int *ret);
+
+/**
+ * \brief return whether or not this process is a worker node.
+ * \param ret 1 for yes, 0 for no
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreIsWorkerNode(int *ret);
+
+
+/**
+ * \brief return whether or not this process is a server node.
+ * \param ret 1 for yes, 0 for no
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreIsServerNode(int *ret);
+
+
+/**
+ * \brief return whether or not this process is a scheduler node.
+ * \param ret 1 for yes, 0 for no
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreIsSchedulerNode(int *ret);
+
+/**
+ * \brief global barrier among all worker machines
+ *
+ * \param handle handle to the KVStore
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreBarrier(KVStoreHandle handle);
+
+/**
+ * \brief the prototype of a server controller
+ * \param head the head of the command
+ * \param body the body of the command
+ */
+typedef void (MXKVStoreServerController)(int head,
+                                         const char* body);
+
+/**
+ * \return Run as server (or scheduler)
+ *
+ * \param handle handle to the KVStore
+ * \param controller the user-defined server controller
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreRunServer(KVStoreHandle handle,
+                                 MXKVStoreServerController controller);
+
+/**
+ * \return Send a command to all server nodes
+ *
+ * \param handle handle to the KVStore
+ * \param cmd_id the head of the command
+ * \param cmd_body the body of the command
+ * \return 0 when success, -1 when failure happens
+ */
+MXNET_DLL int MXKVStoreSendCommmandToServers(KVStoreHandle handle,
+                                             int cmd_id,
+                                             const char* cmd_body);
+
+/**
+ * \brief Create a RecordIO writer object
+ * \param uri path to file
+ * \param out handle pointer to the created object
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOWriterCreate(const char *uri, RecordIOHandle *out);
+
+/**
+ * \brief Delete a RecordIO writer object
+ * \param handle handle to RecordIO object
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOWriterFree(RecordIOHandle handle);
+
+/**
+ * \brief Write a record to a RecordIO object
+ * \param handle handle to RecordIO object
+ * \param buf buffer to write
+ * \param size size of buffer
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOWriterWriteRecord(RecordIOHandle *handle,
+                                          const char *buf, size_t size);
+
+/**
+ * \brief Create a RecordIO reader object
+ * \param uri path to file
+ * \param out handle pointer to the created object
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOReaderCreate(const char *uri, RecordIOHandle *out);
+
+/**
+ * \brief Delete a RecordIO reader object
+ * \param handle handle to RecordIO object
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOReaderFree(RecordIOHandle *handle);
+
+/**
+ * \brief Write a record to a RecordIO object
+ * \param handle handle to RecordIO object
+ * \param buf pointer to return buffer
+ * \param size point to size of buffer
+ * \return 0 when success, -1 when failure happens
+*/
+MXNET_DLL int MXRecordIOReaderReadRecord(RecordIOHandle *handle,
+                                        char const **buf, size_t *size);
+#endif  // MXNET_C_API_H_
+//===== EXPANDED: mxnet/include/mxnet/c_api.h =====
+
+
+namespace mxnet {
+namespace op {
+
+struct NativeOpParam : public dmlc::Parameter<NativeOpParam> {
+  void *info;
+  bool need_top_grad;
+
+  NativeOpInfo *pinfo;
+  int num_inputs_, num_outputs_;
+  DMLC_DECLARE_PARAMETER(NativeOpParam) {
+    DMLC_DECLARE_FIELD(info);
+    DMLC_DECLARE_FIELD(need_top_grad).set_default(true)
+    .describe("Whether this layer needs out grad for backward. "
+      "Should be false for loss layers.");
+  }
+};
+
+template<typename xpu>
+class NativeOp : public Operator {
+ public:
+  explicit NativeOp(NativeOpParam p) {
+    this->param_ = p;
+  }
+
+  virtual void Forward(const OpContext &ctx,
+                       const std::vector<TBlob> &in_data,
+                       const std::vector<OpReqType> &req,
+                       const std::vector<TBlob> &out_data,
+                       const std::vector<TBlob> &aux_args) {
+    using namespace mshadow;
+    Stream<xpu> *s = ctx.get_stream<xpu>();
+    ptrs.clear();
+    ndims.clear();
+    shapes.clear();
+    tags.clear();
+    SyncVec(in_data, "in_data", s, 0);
+    SyncVec(out_data, "out_data", s, 1);
+    s->Wait();
+    param_.pinfo->forward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(), tags.data());
+    for (index_t i = 0; i < out_data.size(); ++i) {
+      CHECK_NE(req[i], kAddTo) << "NativeOp doesn't support AddTo for output";
+      if (req[i] != kNullOp) {
+        std::stringstream ss;
+        ss << std::string("out_data") << i;
+        Copy(out_data[i].FlatTo2D<xpu, real_t>(s),
+             buffer_map[ss.str()].second, s);
+      }
+    }
+    s->Wait();
+  }
+
+  virtual void Backward(const OpContext &ctx,
+                        const std::vector<TBlob> &out_grad,
+                        const std::vector<TBlob> &in_data,
+                        const std::vector<TBlob> &out_data,
+                        const std::vector<OpReqType> &req,
+                        const std::vector<TBlob> &in_grad,
+                        const std::vector<TBlob> &aux_args) {
+    using namespace mshadow;
+    Stream<xpu> *s = ctx.get_stream<xpu>();
+    ptrs.clear();
+    ndims.clear();
+    shapes.clear();
+    tags.clear();
+    SyncVec(in_data, "in_data", s, 0);
+    SyncVec(out_data, "out_data", s, 1);
+    SyncVec(in_grad, "in_grad", s, 2);
+    if (param_.need_top_grad) {
+      SyncVec(out_grad, "out_grad", s, 3);
+    }
+    s->Wait();
+    param_.pinfo->backward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(), tags.data());
+    for (index_t i = 0; i < in_grad.size(); ++i) {
+      CHECK_NE(req[i], kAddTo) << "NativeOp doesn't support AddTo for output";
+      if (req[i] != kNullOp) {
+        std::stringstream ss;
+        ss << std::string("in_grad") << i;
+        Copy(in_grad[i].FlatTo2D<xpu, real_t>(s),
+             buffer_map[ss.str()].second, s);
+      }
+    }
+    s->Wait();
+  }
+
+ private:
+  NativeOpParam param_;
+  std::vector<real_t*> ptrs;
+  std::vector<int> ndims;
+  std::vector<unsigned*> shapes;
+  std::vector<int> tags;
+  std::map<std::string, std::pair<TShape, mshadow::Tensor<cpu, 2> > > buffer_map;
+
+  virtual void SyncBuffer(const TBlob &tblob,
+                          const std::string &name,
+                          mshadow::Stream<xpu> *stream) {
+    using namespace mshadow;
+    std::map<std::string, std::pair<TShape, mshadow::Tensor<cpu, 2> > >::iterator buffer =
+      buffer_map.find(name);
+    if (buffer == buffer_map.end() || buffer->second.first != tblob.shape_) {
+      if (buffer != buffer_map.end()) {
+        FreeSpace<2, real_t>(&(buffer->second.second));
+        buffer_map.erase(buffer);
+      }
+      buffer_map[name] =
+        std::pair<TShape, Tensor<cpu, 2> >(tblob.shape_,
+                                         NewTensor<cpu>(tblob.shape_.FlatTo2D(),
+                                                        0.0f,
+                                                        false));
+      buffer = buffer_map.find(name);
+    }
+    Copy(buffer->second.second, tblob.FlatTo2D<xpu, real_t>(stream), stream);
+  }
+
+  virtual void SyncVec(const std::vector<TBlob> &vec,
+                       const std::string &prefix,
+                       mshadow::Stream<xpu> *stream,
+                       int tag) {
+    for (size_t i = 0; i < vec.size(); ++i) {
+      std::stringstream name;
+      name << prefix << i;
+      SyncBuffer(vec[i], name.str(), stream);
+      ptrs.push_back(buffer_map[name.str()].second.dptr_);
+      ndims.push_back(vec[i].ndim());
+      shapes.push_back(const_cast<index_t*>(vec[i].shape_.data()));
+      tags.push_back(tag);
+    }
+  }
+};  // NativeOp
+
+template<typename xpu>
+Operator* CreateOp(NativeOpParam param);
+
+#if DMLC_USE_CXX11
+class NativeOpProp : public OperatorProperty {
+ public:
+  std::vector<std::string> ListArguments() const override {
+    char ** args = NULL;
+    param_.pinfo->list_arguments(&args);
+    std::vector<std::string> ret;
+    for (int i = 0; args[i] != NULL; ++i) {
+      ret.push_back(args[i]);
+    }
+    return ret;
+  }
+
+  std::vector<std::string> ListOutputs() const override {
+    char ** args = NULL;
+    param_.pinfo->list_outputs(&args);
+    std::vector<std::string> ret;
+    for (int i = 0; args[i] != NULL; ++i) {
+      ret.push_back(args[i]);
+    }
+    return ret;
+  }
+
+  int NumOutputs() const override {
+    return param_.num_outputs_;
+  }
+
+  void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
+    param_.Init(kwargs);
+    for (auto iter = kwargs.begin(); iter != kwargs.end(); ++iter) {
+      if (iter->first == "info") {
+        sscanf(iter->second.c_str(), "%p", &param_.pinfo);
+      }
+    }
+    param_.num_inputs_ = ListArguments().size();
+    param_.num_outputs_ = ListOutputs().size();
+  }
+
+  std::map<std::string, std::string> GetParams() const override {
+    return param_.__DICT__();
+  }
+
+
+  bool InferShape(std::vector<TShape> *in_shape,
+                  std::vector<TShape> *out_shape,
+                  std::vector<TShape> *aux_shape) const override {
+    std::vector<unsigned*> shapes;
+    std::vector<int> ndims;
+    for (auto iter = in_shape->begin(); iter != in_shape->end(); ++iter) {
+      shapes.push_back(iter->data());
+      ndims.push_back(iter->ndim());
+    }
+    shapes.resize(param_.num_inputs_+param_.num_outputs_);
+    ndims.resize(param_.num_inputs_+param_.num_outputs_);
+    param_.pinfo->infer_shape(shapes.size(), ndims.data(), shapes.data());
+    for (unsigned i = 0; i < in_shape->size(); ++i) {
+      (*in_shape)[i] = TShape(shapes[i], shapes[i]+ndims[i]);
+    }
+    for (unsigned i = param_.num_inputs_; i < param_.num_inputs_ + out_shape->size(); ++i) {
+      (*out_shape)[i-param_.num_inputs_] = TShape(shapes[i], shapes[i]+ndims[i]);
+    }
+    return true;
+  }
+
+  OperatorProperty* Copy() const override {
+    NativeOpProp *prop_sym = new NativeOpProp();
+    prop_sym->param_ = this->param_;
+    return prop_sym;
+  }
+
+  std::string TypeString() const override {
+    return "_Native";
+  }
+
+  std::vector<int> DeclareBackwardDependency(
+    const std::vector<int> &out_grad,
+    const std::vector<int> &in_data,
+    const std::vector<int> &out_data) const override {
+    std::vector<int> deps;
+    if (param_.need_top_grad) {
+      deps.insert(deps.end(), out_grad.begin(), out_grad.end());
+    }
+    deps.insert(deps.end(), in_data.begin(), in_data.end());
+    deps.insert(deps.end(), out_data.begin(), out_data.end());
+    return deps;
+  }
+
+  std::vector<std::pair<int, void*> > BackwardInplaceOption(
+    const std::vector<int> &out_grad,
+    const std::vector<int> &in_data,
+    const std::vector<int> &out_data,
+    const std::vector<void*> &in_grad) const override {
+    return {};
+  }
+
+  Operator* CreateOperator(Context ctx) const;
+
+ private:
+  NativeOpParam param_;
+};  // class PythonProp
+#endif  // DMLC_USE_CXX11
+}  // namespace op
+}  // namespace mxnet
+#endif  // MXNET_OPERATOR_NATIVE_OP_INL_H_
+//===== EXPANDED: mxnet/src/operator/native_op-inl.h =====
+
+
+namespace mxnet {
+namespace op {
+template<>
+Operator *CreateOp<cpu>(NativeOpParam param) {
+  return new NativeOp<cpu>(param);
+}
+
+Operator* NativeOpProp::CreateOperator(Context ctx) const {
+  DO_BIND_DISPATCH(CreateOp, param_);
+}
+
+DMLC_REGISTER_PARAMETER(NativeOpParam);
+
+MXNET_REGISTER_OP_PROPERTY(_Native, NativeOpProp)
+.describe("Stub for implementing an operator implemented in native frontend language.")
+.add_arguments(NativeOpParam::__FIELDS__());
+
+}  // namespace op
+}  // namespace mxnet
+//===== EXPANDED: mxnet/src/operator/native_op.cc =====
 
 //===== EXPANDIND: mxnet/src/storage/storage.cc =====
 
@@ -26256,895 +27914,178 @@ struct MemoryStringStream : public dmlc::SeekStream {
 #endif  // DMLC_MEMORY_IO_H_
 //===== EXPANDED: mxnet/dmlc-core/include/dmlc/memory_io.h =====
 
-//===== EXPANDIND: mxnet/include/mxnet/c_api.h =====
+//===== EXPANDIND: mxnet/dmlc-core/include/dmlc/recordio.h =====
 
 /*!
  *  Copyright (c) 2015 by Contributors
- * \file c_api.h
- * \brief C API of mxnet
+ * \file recordio.h
+ * \brief recordio that is able to pack binary data into a splittable
+ *   format, useful to exchange data in binary serialization,
+ *   such as binary raw data or protobuf
  */
-#ifndef MXNET_C_API_H_
-#define MXNET_C_API_H_
+#ifndef DMLC_RECORDIO_H_
+#define DMLC_RECORDIO_H_
 
-#ifdef __cplusplus
-#define MXNET_EXTERN_C extern "C"
-#endif
-
-/*! \brief MXNET_DLL prefix for windows" */
-#ifdef _WIN32
-#ifdef MXNET_EXPORTS
-#define MXNET_DLL MXNET_EXTERN_C __declspec(dllexport)
-#else
-#define MXNET_DLL MXNET_EXTERN_C __declspec(dllimport)
-#endif
-#else
-#define MXNET_DLL MXNET_EXTERN_C
-#endif
-
-/*! \brief manually define unsigned int */
-typedef unsigned int mx_uint;
-/*! \brief manually define unsigned int */
-typedef float mx_float;
-// all the handles are simply void *
-// will be casted internally to specific pointers types
-// these typedefs are mainly used for readablity reasons
-/*! \brief handle to NDArray */
-typedef void *NDArrayHandle;
-/*! \brief handle to a mxnet narray function that changes NDArray */
-typedef const void *FunctionHandle;
-/*! \brief handle to a function that takes param and creates symbol */
-typedef void *AtomicSymbolCreator;
-/*! \brief handle to a symbol that can be bind as operator */
-typedef void *SymbolHandle;
-/*! \brief handle to a AtomicSymbol */
-typedef void *AtomicSymbolHandle;
-/*! \brief handle to an Executor */
-typedef void *ExecutorHandle;
-/*! \brief handle a dataiter creator */
-typedef void *DataIterCreator;
-/*! \brief handle to a DataIterator */
-typedef void *DataIterHandle;
-/*! \brief handle to KVStore */
-typedef void *KVStoreHandle;
+namespace dmlc {
 /*!
- * \brief return str message of the last error
- *  all function in this file will return 0 when success
- *  and -1 when an error occured,
- *  MXGetLastError can be called to retrieve the error
+ * \brief writer of binary recordio
+ *  binary format for recordio
+ *  recordio format: magic lrecord data pad
  *
- *  this function is threadsafe and can be called by different thread
- *  \return error info
- */
-MXNET_DLL const char *MXGetLastError();
-
-//-------------------------------------
-// Part 0: Global State setups
-//-------------------------------------
-/*!
- * \brief Seed the global random number generators in mxnet.
- * \param seed the random number seed.
- * \return 0 when success, -1 when failure happens.
- */
-MXNET_DLL int MXRandomSeed(int seed);
-/*!
- * \brief Notify the engine about a shutdown,
- *  This can help engine to print less messages into display.
+ *  - magic is magic number
+ *  - pad is simply a padding space to make record align to 4 bytes
+ *  - lrecord encodes length and continue bit
+ *     - data.length() = (lrecord & (1U<<29U - 1));
+ *     - cflag == (lrecord >> 29U) & 7;
  *
- *  User do not have to call this function.
- * \return 0 when success, -1 when failure happens.
- */
-MXNET_DLL int MXNotifyShutdown();
-//-------------------------------------
-// Part 1: NDArray creation and deletion
-//-------------------------------------
-/*!
- * \brief create a NDArray handle that is not initialized
- *  can be used to pass in as mutate variables
- *  to hold the result of NDArray
- * \param out the returning handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayCreateNone(NDArrayHandle *out);
-/*!
- * \brief create a NDArray with specified shape
- * \param shape the pointer to the shape
- * \param ndim the dimension of the shape
- * \param dev_type device type, specify device we want to take
- * \param dev_id the device id of the specific device
- * \param delay_alloc whether to delay allocation until
- *    the narray is first mutated
- * \param out the returning handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayCreate(const mx_uint *shape,
-                              mx_uint ndim,
-                              int dev_type,
-                              int dev_id,
-                              int delay_alloc,
-                              NDArrayHandle *out);
-/*!
- * \brief create a NDArray handle that is loaded from raw bytes.
- * \param buf the head of the raw bytes
- * \param size size of the raw bytes
- * \param out the returning handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayLoadFromRawBytes(const void *buf,
-                                        size_t size,
-                                        NDArrayHandle *out);
-/*!
- * \brief save the NDArray into raw bytes.
- * \param handle the NDArray handle
- * \param out_size size of the raw bytes
- * \param out_buf the head of returning memory bytes.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArraySaveRawBytes(NDArrayHandle handle,
-                                    size_t *out_size,
-                                    const char **out_buf);
-/*!
- * \brief Save list of narray into the file.
- * \param fname name of the file.
- * \param num_args number of arguments to save.
- * \param args the array of NDArrayHandles to be saved.
- * \param keys the name of the NDArray, optional, can be NULL
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArraySave(const char* fname,
-                            mx_uint num_args,
-                            NDArrayHandle* args,
-                            const char** keys);
-/*!
- * \brief Load list of narray from the file.
- * \param fname name of the file.
- * \param out_size number of narray loaded.
- * \param out_arr head of the returning narray handles.
- * \param out_name_size size of output name arrray.
- * \param out_names the names of returning NDArrays, can be NULL
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayLoad(const char* fname,
-                            mx_uint *out_size,
-                            NDArrayHandle** out_arr,
-                            mx_uint *out_name_size,
-                            const char*** out_names);
-/*!
- * \brief Perform a synchronize copy from a continugous CPU memory region.
+ *  cflag was used to handle (rare) special case when magic number
+ *  occured in the data sequence.
  *
- *  This function will call WaitToWrite before the copy is performed.
- *  This is useful to copy data from existing memory region that are
- *  not wrapped by NDArray(thus dependency not being tracked).
+ *  In such case, the data is splitted into multiple records by
+ *  the cells of magic number
  *
- * \param handle the NDArray handle
- * \param data the data source to copy from.
- * \param size the memory size we want to copy from.
+ *  (1) cflag == 0: this is a complete record;
+ *  (2) cflag == 1: start of a multiple-rec;
+ *      cflag == 2: middle of multiple-rec;
+ *      cflag == 3: end of multiple-rec
  */
-MXNET_DLL int MXNDArraySyncCopyFromCPU(NDArrayHandle handle,
-                                       const mx_float *data,
-                                       size_t size);
+class RecordIOWriter {
+ public:
+  /*!
+   * \brief magic number of recordio
+   * note: (kMagic >> 29U) & 7 > 3
+   * this ensures lrec will not be kMagic
+   */
+  static const uint32_t kMagic = 0xced7230a;
+  /*!
+   * \brief encode the lrecord
+   * \param cflag cflag part of the lrecord
+   * \param length length part of lrecord
+   * \return the encoded data
+   */
+  inline static uint32_t EncodeLRec(uint32_t cflag, uint32_t length) {
+    return (cflag << 29U) | length;
+  }
+  /*!
+   * \brief decode the flag part of lrecord
+   * \param rec the lrecord
+   * \return the flag
+   */
+  inline static uint32_t DecodeFlag(uint32_t rec) {
+    return (rec >> 29U) & 7U;
+  }
+  /*!
+   * \brief decode the length part of lrecord
+   * \param rec the lrecord
+   * \return the length
+   */
+  inline static uint32_t DecodeLength(uint32_t rec) {
+    return rec & ((1U << 29U) - 1U);
+  }
+  /*!
+   * \brief constructor
+   * \param stream the stream to be constructed
+   */
+  explicit RecordIOWriter(Stream *stream)
+      : stream_(stream), except_counter_(0) {
+    CHECK(sizeof(uint32_t) == 4) << "uint32_t needs to be 4 bytes";
+  }
+  /*!
+   * \brief write record to the stream
+   * \param buf the buffer of memory region
+   * \param size the size of record to write out
+   */
+  void WriteRecord(const void *buf, size_t size);
+  /*!
+   * \brief write record to the stream
+   * \param data the data to write out
+   */
+  inline void WriteRecord(const std::string &data) {
+    this->WriteRecord(data.c_str(), data.length());
+  }
+  /*!
+   * \return number of exceptions(occurance of magic number)
+   *   during the writing process
+   */
+  inline size_t except_counter(void) const {
+    return except_counter_;
+  }
+
+ private:
+  /*! \brief output stream */
+  Stream *stream_;
+  /*! \brief counts the number of exceptions */
+  size_t except_counter_;
+};
 /*!
- * \brief Perform a synchronize copyto a continugous CPU memory region.
+ * \brief reader of binary recordio to reads in record from stream
+ * \sa RecordIOWriter
+ */
+class RecordIOReader {
+ public:
+  /*!
+   * \brief constructor
+   * \param stream the stream to be constructed
+   */
+  explicit RecordIOReader(Stream *stream)
+      : stream_(stream), end_of_stream_(false) {
+    CHECK(sizeof(uint32_t) == 4) << "uint32_t needs to be 4 bytes";
+  }
+  /*!
+   * \brief read next complete record from stream
+   * \param out_rec used to store output record in string
+   * \return true of read was successful, false if end of stream was reached
+   */
+  bool NextRecord(std::string *out_rec);
+
+ private:
+  /*! \brief output stream */
+  Stream *stream_;
+  /*! \brief whether we are at end of stream */
+  bool end_of_stream_;
+};
+
+/*!
+ * \brief reader of binary recordio from Blob returned by InputSplit
+ *  This class divides the blob into several independent parts specified by caller,
+ *  and read from one segment.
+ *  The part reading can be used together with InputSplit::NextChunk for
+ *  multi-threaded parsing(each thread take a RecordIOChunkReader)
  *
- *  This function will call WaitToRead before the copy is performed.
- *  This is useful to copy data from existing memory region that are
- *  not wrapped by NDArray(thus dependency not being tracked).
- *
- * \param handle the NDArray handle
- * \param data the data source to copy into.
- * \param size the memory size we want to copy into.
+ * \sa RecordIOWriter, InputSplit
  */
-MXNET_DLL int MXNDArraySyncCopyToCPU(NDArrayHandle handle,
-                                     mx_float *data,
-                                     size_t size);
-/*!
- * \brief Wait until all the pending writes with respect NDArray are finished.
- *  Always call this before read data out synchronizely.
- * \param handle the NDArray handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayWaitToRead(NDArrayHandle handle);
-/*!
- * \brief Wait until all the pending read/write with respect NDArray are finished.
- *  Always call this before write data into NDArray synchronizely.
- * \param handle the NDArray handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayWaitToWrite(NDArrayHandle handle);
-/*!
- * \brief wait until all delayed operations in
- *   the system is completed
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayWaitAll();
-/*!
- * \brief free the narray handle
- * \param handle the handle to be freed
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayFree(NDArrayHandle handle);
-/*!
- * \brief Slice the NDArray along axis 0.
- * \param handle the handle to the narraya
- * \param slice_begin The beginning index of slice
- * \param slice_end The ending index of slice
- * \param out The NDArrayHandle of sliced NDArray
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArraySlice(NDArrayHandle handle,
-                             mx_uint slice_begin,
-                             mx_uint slice_end,
-                             NDArrayHandle *out);
-/*!
- * \brief get the shape of the array
- * \param handle the handle to the narray
- * \param out_dim the output dimension
- * \param out_pdata pointer holder to get data pointer of the shape
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayGetShape(NDArrayHandle handle,
-                                mx_uint *out_dim,
-                                const mx_uint **out_pdata);
-/*!
- * \brief get the content of the data in NDArray
- * \param handle the handle to the narray
- * \param out_pdata pointer holder to get pointer of data
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayGetData(NDArrayHandle handle,
-                               mx_float **out_pdata);
-/*!
- * \brief get the context of the NDArray
- * \param handle the handle to the narray
- * \param out_dev_type the output device type
- * \param out_dev_id the output device id
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXNDArrayGetContext(NDArrayHandle handle,
-                                  int *out_dev_type,
-                                  int *out_dev_id);
+class RecordIOChunkReader {
+ public:
+  /*!
+   * \brief constructor
+   * \param chunk source data returned by InputSplit
+   * \param part_index which part we want to reado
+   * \param num_parts number of total segments
+   */
+  explicit RecordIOChunkReader(InputSplit::Blob chunk,
+                               unsigned part_index = 0,
+                               unsigned num_parts = 1);
+  /*!
+   * \brief read next complete record from stream
+   *   the blob contains the memory content
+   *   NOTE: this function is not threadsafe, use one
+   *   RecordIOChunkReader per thread
+   * \param out_rec used to store output blob, the header is already
+   *        removed and out_rec only contains the memory content
+   * \return true of read was successful, false if end was reached
+   */
+  bool NextRecord(InputSplit::Blob *out_rec);
 
-//--------------------------------
-// Part 2: functions on NDArray
-//--------------------------------
-/*!
- * \brief list all the available functions handles
- *   most user can use it to list all the needed functions
- * \param out_size the size of returned array
- * \param out_array the output function array
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXListFunctions(mx_uint *out_size,
-                              FunctionHandle **out_array);
-/*!
- * \brief get the function handle by name
- * \param name the name of the function
- * \param out the corresponding function handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXGetFunction(const char *name,
-                            FunctionHandle *out);
-/*!
- * \brief Get the information of the function handle.
- * \param fun The function handle.
- * \param name The returned name of the function.
- * \param description The returned description of the function.
- * \param num_args Number of arguments.
- * \param arg_names Name of the arguments.
- * \param arg_type_infos Type informations about the arguments.
- * \param arg_descriptions Description information about the arguments.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXFuncGetInfo(FunctionHandle fun,
-                            const char **name,
-                            const char **description,
-                            mx_uint *num_args,
-                            const char ***arg_names,
-                            const char ***arg_type_infos,
-                            const char ***arg_descriptions);
-/*!
- * \brief get the argument requirements of the function
- * \param fun input function handle
- * \param num_use_vars how many NDArrays to be passed in as used_vars
- * \param num_scalars scalar variable is needed
- * \param num_mutate_vars how many NDArrays to be passed in as mutate_vars
- * \param type_mask the type mask of this function
- * \return 0 when success, -1 when failure happens
- * \sa MXFuncInvoke
- */
-MXNET_DLL int MXFuncDescribe(FunctionHandle fun,
-                             mx_uint *num_use_vars,
-                             mx_uint *num_scalars,
-                             mx_uint *num_mutate_vars,
-                             int *type_mask);
-/*!
- * \brief invoke a function, the array size of passed in arguments
- *   must match the values in the
- * \param fun the function
- * \param use_vars the normal arguments passed to function
- * \param scalar_args the scalar qarguments
- * \param mutate_vars the mutate arguments
- * \return 0 when success, -1 when failure happens
- * \sa MXFuncDescribeArgs
- */
-MXNET_DLL int MXFuncInvoke(FunctionHandle fun,
-                           NDArrayHandle *use_vars,
-                           mx_float *scalar_args,
-                           NDArrayHandle *mutate_vars);
+ private:
+  /*! \brief internal temporal data */
+  std::string temp_;
+  /*! \brief internal data pointer */
+  char *pbegin_, *pend_;
+};
 
-//--------------------------------------------
-// Part 3: symbolic configuration generation
-//--------------------------------------------
-/*!
- * \brief list all the available AtomicSymbolEntry
- * \param out_size the size of returned array
- * \param out_array the output AtomicSymbolCreator array
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolListAtomicSymbolCreators(mx_uint *out_size,
-                                               AtomicSymbolCreator **out_array);
-/*!
- * \brief Get the detailed information about atomic symbol.
- * \param creator the AtomicSymbolCreator.
- * \param name The returned name of the creator.
- * \param description The returned description of the symbol.
- * \param num_args Number of arguments.
- * \param arg_names Name of the arguments.
- * \param arg_type_infos Type informations about the arguments.
- * \param arg_descriptions Description information about the arguments.
- * \param key_var_num_args The keyword argument for specifying variable number of arguments.
- *            When this parameter has non-zero length, the function allows variable number
- *            of positional arguments, and will need the caller to pass it in in
- *            MXSymbolCreateAtomicSymbol,
- *            With key = key_var_num_args, and value = number of positional arguments.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolGetAtomicSymbolInfo(AtomicSymbolCreator creator,
-                                          const char **name,
-                                          const char **description,
-                                          mx_uint *num_args,
-                                          const char ***arg_names,
-                                          const char ***arg_type_infos,
-                                          const char ***arg_descriptions,
-                                          const char **key_var_num_args);
-/*!
- * \brief Create an AtomicSymbol.
- * \param creator the AtomicSymbolCreator
- * \param num_param the number of parameters
- * \param keys the keys to the params
- * \param vals the vals of the params
- * \param out pointer to the created symbol handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCreateAtomicSymbol(AtomicSymbolCreator creator,
-                                         mx_uint num_param,
-                                         const char **keys,
-                                         const char **vals,
-                                         SymbolHandle *out);
-/*!
- * \brief Create a Variable Symbol.
- * \param name name of the variable
- * \param out pointer to the created symbol handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCreateVariable(const char *name, SymbolHandle *out);
-/*!
- * \brief Create a Symbol by grouping list of symbols together
- * \param num_symbols number of symbols to be grouped
- * \param symbols array of symbol handles
- * \param out pointer to the created symbol handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCreateGroup(mx_uint num_symbols,
-                                  SymbolHandle *symbols,
-                                  SymbolHandle *out);
-/*!
- * \brief Load a symbol from a json file.
- * \param fname the file name.
- * \param out the output symbol.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCreateFromFile(const char *fname, SymbolHandle *out);
-/*!
- * \brief Load a symbol from a json string.
- * \param json the json string.
- * \param out the output symbol.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCreateFromJSON(const char *json, SymbolHandle *out);
-/*!
- * \brief Save a symbol into a json file.
- * \param symbol the input symbol.
- * \param fname the file name.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolSaveToFile(SymbolHandle symbol, const char *fname);
-/*!
- * \brief Save a symbol into a json string
- * \param symbol the input symbol.
- * \param out_json output json string.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolSaveToJSON(SymbolHandle symbol, const char **out_json);
-/*!
- * \brief Free the symbol handle.
- * \param symbol the symbol
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolFree(SymbolHandle symbol);
-/*!
- * \brief Copy the symbol to another handle
- * \param symbol the source symbol
- * \param out used to hold the result of copy
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCopy(SymbolHandle symbol, SymbolHandle *out);
-/*!
- * \brief Print the content of symbol, used for debug.
- * \param symbol the symbol
- * \param out_str pointer to hold the output string of the printing.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolPrint(SymbolHandle symbol, const char **out_str);
-/*!
- * \brief List arguments in the symbol.
- * \param symbol the symbol
- * \param out_size output size
- * \param out_str_array pointer to hold the output string array
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolListArguments(SymbolHandle symbol,
-                                    mx_uint *out_size,
-                                    const char ***out_str_array);
-/*!
- * \brief List returns in the symbol.
- * \param symbol the symbol
- * \param out_size output size
- * \param out_str_array pointer to hold the output string array
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolListOutputs(SymbolHandle symbol,
-                                  mx_uint *out_size,
-                                  const char ***out_str_array);
-/*!
- * \brief Get a symbol that contains all the internals.
- * \param symbol The symbol
- * \param out The output symbol whose outputs are all the internals.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolGetInternals(SymbolHandle symbol,
-                                   SymbolHandle *out);
-/*!
- * \brief Get index-th outputs of the symbol.
- * \param symbol The symbol
- * \param index the Index of the output.
- * \param out The output symbol whose outputs are the index-th symbol.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolGetOutput(SymbolHandle symbol,
-                                mx_uint index,
-                                SymbolHandle *out);
-/*!
- * \brief List auxiliary states in the symbol.
- * \param symbol the symbol
- * \param out_size output size
- * \param out_str_array pointer to hold the output string array
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolListAuxiliaryStates(SymbolHandle symbol,
-                                          mx_uint *out_size,
-                                          const char ***out_str_array);
-/*!
- * \brief Compose the symbol on other symbols.
- *
- *  This function will change the sym hanlde.
- *  To achieve function apply behavior, copy the symbol first
- *  before apply.
- *
- * \param sym the symbol to apply
- * \param name the name of symbol
- * \param num_args number of arguments
- * \param keys the key of keyword args (optional)
- * \param args arguments to sym
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolCompose(SymbolHandle sym,
-                              const char *name,
-                              mx_uint num_args,
-                              const char** keys,
-                              SymbolHandle* args);
-/*!
- * \brief Get the gradient graph of the symbol
- *
- * \param sym the symbol to get gradient
- * \param num_wrt number of arguments to get gradient
- * \param wrt the name of the arguments to get gradient
- * \param out the returned symbol that has gradient
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolGrad(SymbolHandle sym,
-                           mx_uint num_wrt,
-                           const char** wrt,
-                           SymbolHandle* out);
-/*!
- * \brief infer shape of unknown input shapes given the known one.
- *  The shapes are packed into a CSR matrix represented by arg_ind_ptr and arg_shape_data
- *  The call will be treated as a kwargs call if key != nullptr or num_args==0, otherwise it is positional.
- *
- * \param sym symbol handle
- * \param num_args numbe of input arguments.
- * \param keys the key of keyword args (optional)
- * \param arg_ind_ptr the head pointer of the rows in CSR
- * \param arg_shape_data the content of the CSR
- * \param in_shape_size sizeof the returning array of in_shapes
- * \param in_shape_ndim returning array of shape dimensions of eachs input shape.
- * \param in_shape_data returning array of pointers to head of the input shape.
- * \param out_shape_size sizeof the returning array of out_shapes
- * \param out_shape_ndim returning array of shape dimensions of eachs input shape.
- * \param out_shape_data returning array of pointers to head of the input shape.
- * \param aux_shape_size sizeof the returning array of aux_shapes
- * \param aux_shape_ndim returning array of shape dimensions of eachs auxiliary shape.
- * \param aux_shape_data returning array of pointers to head of the auxiliary shape.
- * \param complete whether infer shape completes or more information is needed.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXSymbolInferShape(SymbolHandle sym,
-                                 mx_uint num_args,
-                                 const char** keys,
-                                 const mx_uint *arg_ind_ptr,
-                                 const mx_uint *arg_shape_data,
-                                 mx_uint *in_shape_size,
-                                 const mx_uint **in_shape_ndim,
-                                 const mx_uint ***in_shape_data,
-                                 mx_uint *out_shape_size,
-                                 const mx_uint **out_shape_ndim,
-                                 const mx_uint ***out_shape_data,
-                                 mx_uint *aux_shape_size,
-                                 const mx_uint **aux_shape_ndim,
-                                 const mx_uint ***aux_shape_data,
-                                 int *complete);
-//--------------------------------------------
-// Part 4: Executor interface
-//--------------------------------------------
-/*!
- * \brief Delete the executor
- * \param handle the executor.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorFree(ExecutorHandle handle);
-/*!
- * \brief Print the content of execution plan, used for debug.
- * \param handle the executor.
- * \param out_str pointer to hold the output string of the printing.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorPrint(ExecutorHandle handle, const char **out_str);
-/*!
- * \brief Executor forward method
- *
- * \param handle executor handle
- * \param is_train bool value to indicate whether the forward pass is for evaluation
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorForward(ExecutorHandle handle, int is_train);
-/*!
- * \brief Excecutor run backward
- *
- * \param handle execute handle
- * \param len lenth
- * \param head_grads NDArray handle for heads' gradient
- *
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorBackward(ExecutorHandle handle,
-                                 mx_uint len,
-                                 NDArrayHandle *head_grads);
-
-/*!
- * \brief Get executor's head NDArray
- *
- * \param handle executor handle
- * \param out_size output narray vector size
- * \param out out put narray handles
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorOutputs(ExecutorHandle handle,
-                                mx_uint *out_size,
-                                NDArrayHandle **out);
-
-/*!
- * \brief Generate Executor from symbol
- *
- * \param symbol_handle symbol handle
- * \param dev_type device type
- * \param dev_id device id
- * \param len length
- * \param in_args in args array
- * \param arg_grad_store arg grads handle array
- * \param grad_req_type grad req array
- * \param aux_states_len length of auxiliary states
- * \param aux_states auxiliary states array
- * \param out output executor handle
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXExecutorBind(SymbolHandle symbol_handle,
-                             int dev_type,
-                             int dev_id,
-                             mx_uint len,
-                             NDArrayHandle *in_args,
-                             NDArrayHandle *arg_grad_store,
-                             mx_uint *grad_req_type,
-                             mx_uint aux_states_len,
-                             NDArrayHandle *aux_states,
-                             ExecutorHandle *out);
-
-//--------------------------------------------
-// Part 5: IO Interface
-//--------------------------------------------
-/*!
- * \brief List all the available iterator entries
- * \param out_size the size of returned iterators
- * \param out_array the output iteratos entries
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXListDataIters(mx_uint *out_size,
-                              DataIterCreator **out_array);
-/*!
- * \brief Init an iterator, init with parameters
- * the array size of passed in arguments
- * \param handle of the iterator creator
- * \param num_param number of parameter
- * \param keys parameter keys
- * \param vals parameter values
- * \param out resulting iterator
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterCreateIter(DataIterCreator handle,
-                                   mx_uint num_param,
-                                   const char **keys,
-                                   const char **vals,
-                                   DataIterHandle *out);
-/*!
- * \brief Get the detailed information about data iterator.
- * \param creator the DataIterCreator.
- * \param name The returned name of the creator.
- * \param description The returned description of the symbol.
- * \param num_args Number of arguments.
- * \param arg_names Name of the arguments.
- * \param arg_type_infos Type informations about the arguments.
- * \param arg_descriptions Description information about the arguments.
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterGetIterInfo(DataIterCreator creator,
-                                    const char **name,
-                                    const char **description,
-                                    mx_uint *num_args,
-                                    const char ***arg_names,
-                                    const char ***arg_type_infos,
-                                    const char ***arg_descriptions);
-/*!
- * \brief Free the handle to the IO module
- * \param handle the handle pointer to the data iterator
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterFree(DataIterHandle handle);
-/*!
- * \brief Move iterator to next position
- * \param handle the handle to iterator
- * \param out return value of next
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterNext(DataIterHandle handle,
-                             int *out);
-/*!
- * \brief Call iterator.Reset
- * \param handle the handle to iterator
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterBeforeFirst(DataIterHandle handle);
-
-/*!
- * \brief Get the handle to the NDArray of underlying data
- * \param handle the handle pointer to the data iterator
- * \param out handle to underlying data NDArray
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterGetData(DataIterHandle handle,
-                                NDArrayHandle *out);
-
-/*!
- * \brief Get the padding number in current data batch
- * \param handle the handle pointer to the data iterator
- * \param pad pad number ptr
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterGetPadNum(DataIterHandle handle,
-                                  int *pad);
-
-/*!
- * \brief Get the handle to the NDArray of underlying label
- * \param handle the handle pointer to the data iterator
- * \param out the handle to underlying label NDArray
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXDataIterGetLabel(DataIterHandle handle,
-                                 NDArrayHandle *out);
-//--------------------------------------------
-// Part 5: basic KVStore interface
-//--------------------------------------------
-/*!
- * \brief Create a kvstore
- * \param type the type of KVStore
- * \param out The output type of KVStore
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreCreate(const char *type,
-                              KVStoreHandle *out);
-/*!
- * \brief Delete a KVStore handle.
- * \param handle handle to the kvstore
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreFree(KVStoreHandle handle);
-/*!
- * \brief Init a list of (key,value) pairs in kvstore
- * \param handle handle to the kvstore
- * \param num the number of key-value pairs
- * \param keys the list of keys
- * \param vals the list of values
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreInit(KVStoreHandle handle,
-                            mx_uint num,
-                            const int* keys,
-                            NDArrayHandle* vals);
-
-/*!
- * \brief Push a list of (key,value) pairs to kvstore
- * \param handle handle to the kvstore
- * \param num the number of key-value pairs
- * \param keys the list of keys
- * \param vals the list of values
- * \param priority the priority of the action
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStorePush(KVStoreHandle handle,
-                            mx_uint num,
-                            const int* keys,
-                            NDArrayHandle* vals,
-                            int priority);
-/*!
- * \brief pull a list of (key, value) pairs from the kvstore
- * \param handle handle to the kvstore
- * \param num the number of key-value pairs
- * \param keys the list of keys
- * \param vals the list of values
- * \param priority the priority of the action
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStorePull(KVStoreHandle handle,
-                            mx_uint num,
-                            const int* keys,
-                            NDArrayHandle* vals,
-                            int priority);
-/*!
- * \brief user-defined updater for the kvstore
- * It's this updater's responsibility to delete \a recv and \a local
- * \param the key
- * \param recv the pushed value on this key
- * \param local the value stored on local on this key
- * \param handle The additional handle to the updater
- */
-typedef void (MXKVStoreUpdater)(int key,
-                                NDArrayHandle recv,
-                                NDArrayHandle local,
-                                void *handle);
-/*!
- * \brief register an push updater
- * \param handle handle to the KVStore
- * \param updater udpater function
- * \param updater_handle The additional handle used to invoke the updater
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreSetUpdater(KVStoreHandle handle,
-                                  MXKVStoreUpdater updater,
-                                  void *updater_handle);
-/*!
- * \brief get the type of the kvstore
- * \param handle handle to the KVStore
- * \param type a string type
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreGetType(KVStoreHandle handle,
-                               const char** type);
-//--------------------------------------------
-// Part 6: advanced KVStore for multi-machines
-//--------------------------------------------
-
-/**
- * \brief return The rank of this node in its group, which is in [0, GroupSize).
- *
- * \param handle handle to the KVStore
- * \param ret the node rank
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreGetRank(KVStoreHandle handle,
-                               int *ret);
-
-/**
- * \brief return The number of nodes in this group, which is
- * - number of workers if if `IsWorkerNode() == true`,
- * - number of servers if if `IsServerNode() == true`,
- * - 1 if `IsSchedulerNode() == true`,
- * \param handle handle to the KVStore
- * \param ret the group size
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreGetGroupSize(KVStoreHandle handle,
-                                    int *ret);
-
-/**
- * \brief return whether or not this process is a worker node.
- * \param ret 1 for yes, 0 for no
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreIsWorkerNode(int *ret);
-
-
-/**
- * \brief return whether or not this process is a server node.
- * \param ret 1 for yes, 0 for no
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreIsServerNode(int *ret);
-
-
-/**
- * \brief return whether or not this process is a scheduler node.
- * \param ret 1 for yes, 0 for no
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreIsSchedulerNode(int *ret);
-
-/**
- * \brief global barrier among all worker machines
- *
- * \param handle handle to the KVStore
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreBarrier(KVStoreHandle handle);
-
-/**
- * \brief the prototype of a server controller
- * \param head the head of the command
- * \param body the body of the command
- */
-typedef void (MXKVStoreServerController)(int head,
-                                         const char* body);
-
-/**
- * \return Run as server (or scheduler)
- *
- * \param handle handle to the KVStore
- * \param controller the user-defined server controller
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreRunServer(KVStoreHandle handle,
-                                 MXKVStoreServerController controller);
-
-/**
- * \return Send a command to all server nodes
- *
- * \param handle handle to the KVStore
- * \param cmd_id the head of the command
- * \param cmd_body the body of the command
- * \return 0 when success, -1 when failure happens
- */
-MXNET_DLL int MXKVStoreSendCommmandToServers(KVStoreHandle handle,
-                                             int cmd_id,
-                                             const char* cmd_body);
-
-#endif  // MXNET_C_API_H_
-//===== EXPANDED: mxnet/include/mxnet/c_api.h =====
+}  // namespace dmlc
+#endif  // DMLC_RECORDIO_H_
+//===== EXPANDED: mxnet/dmlc-core/include/dmlc/recordio.h =====
 
 //===== EXPANDIND: mxnet/src/c_api/c_api_error.h =====
 
@@ -28213,8 +29154,9 @@ int MXKVStoreIsSchedulerNode(int *ret) {
 int MXKVStoreRunServer(KVStoreHandle handle,
                        MXKVStoreServerController controller) {
   API_BEGIN();
-  auto ctrl = [controller](int head, const std::string& body) {
-    controller(head, body.c_str());
+  MXKVStoreServerController *controller_temp = controller;
+  auto ctrl = [controller_temp](int head, const std::string& body) {
+      controller_temp(head, body.c_str());
   };
   static_cast<KVStore*>(handle)->RunServer(ctrl);
   API_END();
@@ -28233,6 +29175,78 @@ int MXKVStoreGetType(KVStoreHandle handle,
                      const char** type) {
   API_BEGIN();
   *CHECK_NOTNULL(type) = static_cast<KVStore*>(handle)->type().c_str();
+  API_END();
+}
+
+struct MXRecordIOContext {
+  dmlc::RecordIOWriter *writer;
+  dmlc::RecordIOReader *reader;
+  dmlc::Stream *stream;
+  std::string *read_buff;
+};
+
+int MXRecordIOWriterCreate(const char *uri,
+                           RecordIOHandle *out) {
+  API_BEGIN();
+  dmlc::Stream *stream = dmlc::Stream::Create(uri, "w");
+  MXRecordIOContext *context = new MXRecordIOContext;
+  context->writer = new dmlc::RecordIOWriter(stream);
+  context->reader = NULL;
+  context->stream = stream;
+  context->read_buff = NULL;
+  *out = reinterpret_cast<RecordIOHandle>(context);
+  API_END();
+}
+
+int MXRecordIOWriterFree(RecordIOHandle handle) {
+  API_BEGIN();
+  MXRecordIOContext *context =
+    reinterpret_cast<MXRecordIOContext*>(handle);
+  delete context->writer;
+  delete context->stream;
+  API_END();
+}
+
+int MXRecordIOWriterWriteRecord(RecordIOHandle *handle,
+                                const char *buf, size_t size) {
+  API_BEGIN();
+  MXRecordIOContext *context =
+    reinterpret_cast<MXRecordIOContext*>(handle);
+  context->writer->WriteRecord(reinterpret_cast<const void*>(buf), size);
+  API_END();
+}
+
+int MXRecordIOReaderCreate(const char *uri,
+                           RecordIOHandle *out) {
+  API_BEGIN();
+  dmlc::Stream *stream = dmlc::Stream::Create(uri, "r");
+  MXRecordIOContext *context = new MXRecordIOContext;
+  context->reader = new dmlc::RecordIOReader(stream);
+  context->writer = NULL;
+  context->stream = stream;
+  context->read_buff = new std::string();
+  *out = reinterpret_cast<RecordIOHandle>(context);
+  API_END();
+}
+
+int MXRecordIOReaderFree(RecordIOHandle *handle) {
+  API_BEGIN();
+  MXRecordIOContext *context =
+    reinterpret_cast<MXRecordIOContext*>(handle);
+  delete context->reader;
+  delete context->stream;
+  delete context->read_buff;
+  API_END();
+}
+
+int MXRecordIOReaderReadRecord(RecordIOHandle *handle,
+                              char const **buf, size_t *size) {
+  API_BEGIN();
+  MXRecordIOContext *context =
+    reinterpret_cast<MXRecordIOContext*>(handle);
+  context->reader->NextRecord(context->read_buff);
+  *buf = context->read_buff->c_str();
+  *size = context->read_buff->size();
   API_END();
 }
 //===== EXPANDED: mxnet/src/c_api/c_api.cc =====
@@ -30536,179 +31550,6 @@ SeekStream *LocalFileSystem::OpenForRead(const URI &path, bool allow_null) {
 //===== EXPANDIND: mxnet/dmlc-core/src/io/recordio_split.cc =====
 
 // Copyright by Contributors
-//===== EXPANDIND: mxnet/dmlc-core/include/dmlc/recordio.h =====
-
-/*!
- *  Copyright (c) 2015 by Contributors
- * \file recordio.h
- * \brief recordio that is able to pack binary data into a splittable
- *   format, useful to exchange data in binary serialization,
- *   such as binary raw data or protobuf
- */
-#ifndef DMLC_RECORDIO_H_
-#define DMLC_RECORDIO_H_
-
-namespace dmlc {
-/*!
- * \brief writer of binary recordio
- *  binary format for recordio
- *  recordio format: magic lrecord data pad
- *
- *  - magic is magic number
- *  - pad is simply a padding space to make record align to 4 bytes
- *  - lrecord encodes length and continue bit
- *     - data.length() = (lrecord & (1U<<29U - 1));
- *     - cflag == (lrecord >> 29U) & 7;
- *
- *  cflag was used to handle (rare) special case when magic number
- *  occured in the data sequence.
- *
- *  In such case, the data is splitted into multiple records by
- *  the cells of magic number
- *
- *  (1) cflag == 0: this is a complete record;
- *  (2) cflag == 1: start of a multiple-rec;
- *      cflag == 2: middle of multiple-rec;
- *      cflag == 3: end of multiple-rec
- */
-class RecordIOWriter {
- public:
-  /*!
-   * \brief magic number of recordio
-   * note: (kMagic >> 29U) & 7 > 3
-   * this ensures lrec will not be kMagic
-   */
-  static const uint32_t kMagic = 0xced7230a;
-  /*!
-   * \brief encode the lrecord
-   * \param cflag cflag part of the lrecord
-   * \param length length part of lrecord
-   * \return the encoded data
-   */
-  inline static uint32_t EncodeLRec(uint32_t cflag, uint32_t length) {
-    return (cflag << 29U) | length;
-  }
-  /*!
-   * \brief decode the flag part of lrecord
-   * \param rec the lrecord
-   * \return the flag
-   */
-  inline static uint32_t DecodeFlag(uint32_t rec) {
-    return (rec >> 29U) & 7U;
-  }
-  /*!
-   * \brief decode the length part of lrecord
-   * \param rec the lrecord
-   * \return the length
-   */
-  inline static uint32_t DecodeLength(uint32_t rec) {
-    return rec & ((1U << 29U) - 1U);
-  }
-  /*!
-   * \brief constructor
-   * \param stream the stream to be constructed
-   */
-  explicit RecordIOWriter(Stream *stream)
-      : stream_(stream), except_counter_(0) {
-    CHECK(sizeof(uint32_t) == 4) << "uint32_t needs to be 4 bytes";
-  }
-  /*!
-   * \brief write record to the stream
-   * \param buf the buffer of memory region
-   * \param size the size of record to write out
-   */
-  void WriteRecord(const void *buf, size_t size);
-  /*!
-   * \brief write record to the stream
-   * \param data the data to write out
-   */
-  inline void WriteRecord(const std::string &data) {
-    this->WriteRecord(data.c_str(), data.length());
-  }
-  /*!
-   * \return number of exceptions(occurance of magic number)
-   *   during the writing process
-   */
-  inline size_t except_counter(void) const {
-    return except_counter_;
-  }
-
- private:
-  /*! \brief output stream */
-  Stream *stream_;
-  /*! \brief counts the number of exceptions */
-  size_t except_counter_;
-};
-/*!
- * \brief reader of binary recordio to reads in record from stream
- * \sa RecordIOWriter
- */
-class RecordIOReader {
- public:
-  /*!
-   * \brief constructor
-   * \param stream the stream to be constructed
-   */
-  explicit RecordIOReader(Stream *stream)
-      : stream_(stream), end_of_stream_(false) {
-    CHECK(sizeof(uint32_t) == 4) << "uint32_t needs to be 4 bytes";
-  }
-  /*!
-   * \brief read next complete record from stream
-   * \param out_rec used to store output record in string
-   * \return true of read was successful, false if end of stream was reached
-   */
-  bool NextRecord(std::string *out_rec);
-
- private:
-  /*! \brief output stream */
-  Stream *stream_;
-  /*! \brief whether we are at end of stream */
-  bool end_of_stream_;
-};
-
-/*!
- * \brief reader of binary recordio from Blob returned by InputSplit
- *  This class divides the blob into several independent parts specified by caller,
- *  and read from one segment.
- *  The part reading can be used together with InputSplit::NextChunk for
- *  multi-threaded parsing(each thread take a RecordIOChunkReader)
- *
- * \sa RecordIOWriter, InputSplit
- */
-class RecordIOChunkReader {
- public:
-  /*!
-   * \brief constructor
-   * \param chunk source data returned by InputSplit
-   * \param part_index which part we want to reado
-   * \param num_parts number of total segments
-   */
-  explicit RecordIOChunkReader(InputSplit::Blob chunk,
-                               unsigned part_index = 0,
-                               unsigned num_parts = 1);
-  /*!
-   * \brief read next complete record from stream
-   *   the blob contains the memory content
-   *   NOTE: this function is not threadsafe, use one
-   *   RecordIOChunkReader per thread
-   * \param out_rec used to store output blob, the header is already
-   *        removed and out_rec only contains the memory content
-   * \return true of read was successful, false if end was reached
-   */
-  bool NextRecord(InputSplit::Blob *out_rec);
-
- private:
-  /*! \brief internal temporal data */
-  std::string temp_;
-  /*! \brief internal data pointer */
-  char *pbegin_, *pend_;
-};
-
-}  // namespace dmlc
-#endif  // DMLC_RECORDIO_H_
-//===== EXPANDED: mxnet/dmlc-core/include/dmlc/recordio.h =====
-
 //===== EXPANDIND: mxnet/dmlc-core/src/io/recordio_split.h =====
 
 /*!
