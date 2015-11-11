@@ -29,9 +29,9 @@ func InputFrom(imgs []image.Image, mean ImageMean) ([]float32, error) {
 		for y := 0; y < height; y++ {
 			for x := 0; x < width; x++ {
 				r, g, b, _ := m.At(x+bounds.Min.X, y+bounds.Min.Y).RGBA()
-				out[start+y*width+x] = float32(b>>8) - mean.B
+				out[start+y*width+x] = float32(r>>8) - mean.R
 				out[start+width*height+y*width+x] = float32(g>>8) - mean.G
-				out[start+2*width*height+y*width+x] = float32(r>>8) - mean.R
+				out[start+2*width*height+y*width+x] = float32(b>>8) - mean.B
 			}
 		}
 
