@@ -5109,6 +5109,17 @@ inline void DeleteStream<gpu>(Stream<gpu> *stream) {
 #endif  // MSHADOW_STREAM_GPU_INL_H_
 //===== EXPANDED: mxnet/mshadow/mshadow/stream_gpu-inl.h =====
 
+//===== EXPANDIND: mxnet/mshadow/mshadow/extension.h =====
+
+/*!
+ * Copyright by Contributors
+ * \file extension.h
+ * \brief some extension of expressions,
+ *  used to support something beyond elementwise op
+ * \author Tianqi Chen, Bing Xu
+ */
+#ifndef MSHADOW_EXTENSION_H_
+#define MSHADOW_EXTENSION_H_
 //===== EXPANDIND: mxnet/mshadow/mshadow/expr_engine-inl.h =====
 
 /*!
@@ -5486,6 +5497,761 @@ struct ShapeCheck<dim, BinaryMapExp<OP, TA, TB, DType, etype> > {
  */
 #ifndef MSHADOW_DOT_ENGINE_INL_H_
 #define MSHADOW_DOT_ENGINE_INL_H_
+
+//===== EXPANDIND: mxnet/mshadow/mshadow/extension/implicit_gemm.h =====
+
+/*!
+ *  Copyright (c) 2014 by Contributors
+ * \file implicit_gemm.h
+ * \brief support for implicit GEMM operation
+ * \author Tianqi Chen
+ */
+#ifndef MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
+#define MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
+
+//===== EXPANDIND: mxnet/mshadow/mshadow/packet-inl.h =====
+
+/*!
+ *  Copyright (c) 2014 by Contributors
+ * \file packet-inl.h
+ * \brief Generic packet vectorization code
+ */
+#ifndef MSHADOW_PACKET_INL_H_
+#define MSHADOW_PACKET_INL_H_
+
+#ifdef __APPLE__
+#else
+#endif
+
+
+namespace mshadow {
+/*! \brief namespace of packet math*/
+namespace packet {
+
+enum PacketArch {
+  kPlain,
+  kSSE2,
+};
+
+#if MSHADOW_USE_SSE
+#define MSHADOW_DEFAULT_PACKET  ::mshadow::packet::kSSE2
+#else
+#define MSHADOW_DEFAULT_PACKET  ::mshadow::packet::kPlain
+#endif
+
+// whether packet operator is enabled.
+/*!
+ * \brief Generic packet type
+ * \tparam DType The data type of the packet.
+ * \tparam Arch the Arch of the packet.
+ */
+template<typename DType, PacketArch Arch = MSHADOW_DEFAULT_PACKET>
+struct Packet;
+
+template<PacketArch Arch>
+struct AlignBytes {
+  static const index_t value = 4;
+};
+
+}  // namespace packet
+}  // namespace mshadow
+
+namespace mshadow {
+namespace packet {
+/*!
+ * \brief analog to cudaMallocPitch, allocate a aligned space with num_line * lspace cells
+ * \param out_pitch output parameter, the actuall space allocated for each line
+ * \param lspace number of cells required for each line
+ * \param num_line number of lines to be allocated
+ */
+inline void* AlignedMallocPitch(size_t *out_pitch,
+                                size_t lspace,
+                                size_t num_line) {
+  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
+  const index_t mask = (1 << bits) - 1;
+
+  size_t pitch = ((lspace + mask) >> bits) << bits;
+  *out_pitch = pitch;
+#ifdef _MSC_VER
+  void *res = _aligned_malloc(pitch * num_line, 1 << bits);
+#else
+  void *res;
+  int ret = posix_memalign(&res, 1 << bits, pitch * num_line);
+  CHECK_EQ(ret, 0) << "AlignedMallocPitch failed";
+#endif
+  if (res == NULL) {
+    LOG(FATAL) << "AlignedMallocPitch failed";
+  }
+  return res;
+}
+
+/*!
+ * \brief free aligned space
+ * \param ptr pointer to space to be freed
+ */
+inline void AlignedFree(void *ptr) {
+#ifdef _MSC_VER
+  _aligned_free(ptr);
+#else
+  free(ptr);
+#endif
+}
+
+/*! \brief check if a pointer is aligned */
+template<PacketArch Arch>
+inline bool CheckAlign(size_t pitch) {
+  const index_t bits = AlignBytes<Arch>::value;
+  return !(pitch & ((1 << bits) - 1));
+}
+
+/*! \brief check if a pointer is aligned */
+template<PacketArch Arch>
+inline bool CheckAlign(void *ptr) {
+  return CheckAlign<Arch>(reinterpret_cast<size_t>(ptr));
+}
+
+/*!
+ * \brief get upper bound of aligned index of size
+ * \param size size of the array
+ * \param fsize size of float
+ */
+template<typename DType, PacketArch Arch>
+inline index_t UpperAlign(index_t size) {
+  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
+  const index_t mask = (1 << bits) - 1;
+  const index_t fsize = sizeof(DType);
+  return (((size * fsize + mask) >> bits) << bits) / fsize;
+}
+
+/*!
+ * \brief get lower bound of aligned index of size
+ * \param size size of the array
+ * \param fsize size of float
+ */
+template<typename DType, PacketArch Arch>
+inline index_t LowerAlign(index_t size) {
+  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
+  const index_t fsize = sizeof(DType);
+  return (((size * fsize) >> bits) << bits) / fsize;
+}
+
+/*!
+ * \brief generic Packet operator
+ * \tparam OP The operator
+ * \tparam DType The data type
+ * \tparam Arch The architecture.
+ */
+template<typename OP, typename DType, PacketArch Arch>
+struct PacketOp {
+  static const bool kEnabled = false;
+};
+// specialization of operators
+template<typename DType, PacketArch Arch>
+struct PacketOp<op::plus, DType, Arch> {
+  static const bool kEnabled = true;
+  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
+                                                   const Packet<DType, Arch>& rhs) {
+    return lhs + rhs;
+  }
+};
+template<typename DType, PacketArch Arch>
+struct PacketOp<op::minus, DType, Arch> {
+  static const bool kEnabled = true;
+  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
+                                                  const Packet<DType, Arch>& rhs) {
+    return lhs - rhs;
+  }
+};
+template<typename DType, PacketArch Arch>
+struct PacketOp<op::mul, DType, Arch> {
+  static const bool kEnabled = true;
+  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
+                                                  const Packet<DType, Arch>& rhs) {
+    return lhs * rhs;
+  }
+};
+template<typename DType, PacketArch Arch>
+struct PacketOp<op::div, DType, Arch> {
+  static const bool kEnabled = true;
+  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
+                                                  const Packet<DType, Arch>& rhs) {
+    return lhs / rhs;
+  }
+};
+
+template<typename DType, PacketArch Arch>
+struct PacketOp<op::identity, DType, Arch> {
+  static const bool kEnabled = true;
+  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& src) {
+    return src;
+  }
+};
+
+
+// savers to do storage
+template<typename SV, typename TFloat, PacketArch Arch>
+struct Saver{
+  MSHADOW_CINLINE static void Save(TFloat *dst, const Packet<TFloat, Arch>& src) {
+    Packet<TFloat, Arch> lhs = Packet<TFloat, Arch>::Load(dst);
+    Packet<TFloat, Arch> ans = PacketOp<typename SV::OPType, TFloat, Arch>::Map(lhs, src);
+    ans.Store(dst);
+  }
+};
+template<typename TFloat, PacketArch Arch>
+struct Saver<sv::saveto, TFloat, Arch> {
+  MSHADOW_CINLINE static void Save(TFloat *dst, const Packet<TFloat, Arch>& src) {
+    src.Store(dst);
+  }
+};
+}  // namespace packet
+}  // namespace mshadow
+
+//===== EXPANDIND: mxnet/mshadow/mshadow/packet/plain-inl.h =====
+
+/*!
+ *  Copyright (c) 2014 by Contributors
+ * \file plain-inl.h
+ * \brief support of plain packet that use the plain datatype.
+ */
+#ifndef MSHADOW_PACKET_PLAIN_INL_H_
+#define MSHADOW_PACKET_PLAIN_INL_H_
+
+
+namespace mshadow {
+namespace packet {
+template<typename DType>
+struct Packet<DType, kPlain> {
+ public:
+  /*! \brief number of float in vector */
+  static const index_t kSize = 1;
+  /*! \brief The internal data */
+  DType data_;
+  // enable default copy constructor
+  Packet(void) {}
+  // constructor from the intrinsic type
+  explicit Packet(DType data) : data_(data) {}
+  // create a fill with the target value s
+  MSHADOW_CINLINE static Packet<DType, kPlain> Fill(DType s) {
+    return Packet<DType, kPlain>(s);
+  }
+  // load from address
+  MSHADOW_CINLINE static Packet<DType, kPlain> Load(const DType* src) {
+    return Packet<DType, kPlain>(*src);
+  }
+  // load from address
+  MSHADOW_CINLINE static Packet<DType, kPlain> LoadUnAligned(const DType* src) {
+    return Packet<DType, kPlain>(*src);
+  }
+  // fill it with value s
+  MSHADOW_CINLINE Packet<DType, kPlain>& operator=(DType s) {
+    data_ = s;
+    return *this;
+  }
+  // store data into dst
+  MSHADOW_CINLINE void Store(DType* dst) const {
+    *dst = data_;
+  }
+  // get the sum of all contents
+  MSHADOW_CINLINE DType Sum() const {
+    return data_;
+  }
+};
+
+template<typename DType>
+MSHADOW_CINLINE Packet<DType, kPlain> operator+(const Packet<DType, kPlain>& lhs,
+                                                const Packet<DType, kPlain>& rhs) {
+  return Packet<DType, kPlain>(lhs.data_ + rhs.data_);
+}
+
+template<typename DType>
+MSHADOW_CINLINE Packet<DType, kPlain> operator-(const Packet<DType, kPlain>& lhs,
+                                                const Packet<DType, kPlain>& rhs) {
+  return Packet<DType, kPlain>(lhs.data_ - rhs.data_);
+}
+template<typename DType>
+MSHADOW_CINLINE Packet<DType, kPlain> operator*(const Packet<DType, kPlain>& lhs,
+                                                    const Packet<DType, kPlain>& rhs) {
+  return Packet<DType, kPlain>(lhs.data_ * rhs.data_);
+}
+
+template<typename DType>
+MSHADOW_CINLINE Packet<DType, kPlain> operator/(const Packet<DType, kPlain>& lhs,
+                                                    const Packet<DType, kPlain>& rhs) {
+  return Packet<DType, kPlain>(lhs.data_ / rhs.data_);
+}
+}  // namespace packet
+}  // namespace mshadow
+#endif  // MSHADOW_PACKET_PLAIN_INL_H_
+//===== EXPANDED: mxnet/mshadow/mshadow/packet/plain-inl.h =====
+
+#if MSHADOW_USE_SSE && !defined(__CUDACC__)
+//===== EXPANDIND: mxnet/mshadow/mshadow/packet/sse-inl.h =====
+
+/*!
+ *  Copyright (c) 2014 by Contributors
+ * \file sse-inl.h
+ * \brief support of sse2 packet optimization of some operations
+ * \author Tianqi Chen
+ */
+#ifndef MSHADOW_PACKET_SSE_INL_H_
+#define MSHADOW_PACKET_SSE_INL_H_
+
+
+namespace mshadow {
+namespace packet {
+template<>
+struct Packet<float, kSSE2> {
+ public:
+  /*! \brief number of float in vector */
+  static const index_t kSize = 4;
+  /*! \brief The internal data */
+  __m128 data_;
+  // enable default copy constructor
+  Packet(void) {}
+  // constructor from the intrinsic type
+  explicit Packet(__m128 data) : data_(data) {}
+  // create a fill with the target value s
+  MSHADOW_CINLINE static Packet<float, kSSE2> Fill(float s) {
+    return Packet<float, kSSE2>(_mm_set1_ps(s));
+  }
+  // load from address
+  MSHADOW_CINLINE static Packet<float, kSSE2> Load(const float* src) {
+    return Packet<float, kSSE2>(_mm_load_ps(src));
+  }
+  // load from address
+  MSHADOW_CINLINE static Packet<float, kSSE2> LoadUnAligned(const float* src) {
+    return Packet<float, kSSE2>(_mm_loadu_ps(src));
+  }
+  // fill it with value s
+  MSHADOW_CINLINE Packet<float, kSSE2>& operator=(float s) {
+    data_ = _mm_set1_ps(s);
+    return *this;
+  }
+  // store data into dst
+  MSHADOW_CINLINE void Store(float* dst) const {
+    _mm_store_ps(dst, data_);
+  }
+  // get the sum of all contents
+  MSHADOW_CINLINE float Sum() const {
+    __m128 ans  = _mm_add_ps(data_, _mm_movehl_ps(data_, data_));
+    __m128 rst  = _mm_add_ss(ans, _mm_shuffle_ps(ans, ans, 1));
+#if defined(_MSC_VER) && (_MSC_VER <= 1500) && defined(_WIN64)
+    return rst.m128_f32[0];
+#else
+    float rr = _mm_cvtss_f32(rst);
+    return rr;
+#endif
+  }
+};
+
+
+/*! \brief vector real type for float */
+template<>
+struct Packet<double, kSSE2> {
+  /*! \brief number of float in vector */
+  static const index_t kSize = 2;
+  // internal data
+  __m128d data_;
+  // constructor
+  Packet(void) {}
+  explicit Packet(__m128d data) : data_(data) {}
+  // create a fill with the target value s
+  MSHADOW_CINLINE static Packet<double, kSSE2> Fill(double s) {
+    return Packet<double, kSSE2>(_mm_set1_pd(s));
+  }
+  // load from address
+  MSHADOW_CINLINE static Packet<double, kSSE2> Load(const double* src) {
+    return Packet<double, kSSE2>(_mm_load_pd(src));
+  }
+  MSHADOW_CINLINE static Packet<double, kSSE2> LoadUnAligned(const double* src) {
+    return Packet<double, kSSE2>(_mm_loadu_pd(src));
+  }
+  // fill it with value s
+  MSHADOW_CINLINE Packet<double, kSSE2>& operator=(double s) {
+    data_ = _mm_set1_pd(s);
+    return *this;
+  }
+  // store data into dst
+  MSHADOW_CINLINE void Store(double* dst) const {
+    _mm_store_pd(dst, data_);
+  }
+  // get sum of all content
+  inline double Sum(void) const {
+    __m128d tmp =  _mm_add_sd(data_, _mm_unpackhi_pd(data_, data_));
+#if defined(_MSC_VER) && (_MSC_VER <= 1500) && defined(_WIN64)
+    return tmp.m128d_f64[0];
+#else
+    double ans = _mm_cvtsd_f64(tmp);
+    return ans;
+#endif
+  }
+};
+
+MSHADOW_CINLINE Packet<float, kSSE2> operator+(const Packet<float, kSSE2>& lhs,
+                                                    const Packet<float, kSSE2>& rhs) {
+  return Packet<float, kSSE2>(_mm_add_ps(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<double, kSSE2> operator+(const Packet<double, kSSE2>& lhs,
+                                                     const Packet<double, kSSE2>& rhs) {
+  return Packet<double, kSSE2>(_mm_add_pd(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<float, kSSE2> operator-(const Packet<float, kSSE2>& lhs,
+                                                    const Packet<float, kSSE2>& rhs) {
+  return Packet<float, kSSE2>(_mm_sub_ps(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<double, kSSE2> operator-(const Packet<double, kSSE2>& lhs,
+                                                     const Packet<double, kSSE2>& rhs) {
+  return Packet<double, kSSE2>(_mm_sub_pd(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<float, kSSE2> operator*(const Packet<float, kSSE2>& lhs,
+                                                    const Packet<float, kSSE2>& rhs) {
+  return Packet<float, kSSE2>(_mm_mul_ps(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<double, kSSE2> operator*(const Packet<double, kSSE2>& lhs,
+                                                     const Packet<double, kSSE2>& rhs) {
+  return Packet<double, kSSE2>(_mm_mul_pd(lhs.data_, rhs.data_));
+}
+
+
+MSHADOW_CINLINE Packet<float, kSSE2> operator/(const Packet<float, kSSE2>& lhs,
+                                                    const Packet<float, kSSE2>& rhs) {
+  return Packet<float, kSSE2>(_mm_div_ps(lhs.data_, rhs.data_));
+}
+
+MSHADOW_CINLINE Packet<double, kSSE2> operator/(const Packet<double, kSSE2>& lhs,
+                                                     const Packet<double, kSSE2>& rhs) {
+  return Packet<double, kSSE2>(_mm_div_pd(lhs.data_, rhs.data_));
+}
+
+}  // namespace packet
+}  // namespace mshadow
+#endif  // MSHADOW_PACKET_SSE_INL_H_
+//===== EXPANDED: mxnet/mshadow/mshadow/packet/sse-inl.h =====
+
+#endif
+
+namespace mshadow {
+namespace expr {
+
+typedef packet::PacketArch PacketArch;
+
+// same as plan, but use packet
+template<typename ExpType, typename DType, PacketArch Arch>
+class PacketPlan {
+ public:
+  /*!
+   * \brief evaluate the expression at index [y][x],
+   * x will be aligned to Packet<DType, Arch>::kSize
+   */
+  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const;
+  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const;
+};
+
+template <typename Device, int dim, typename DType, PacketArch Arch>
+class PacketPlan<Tensor<Device, dim, DType>, DType, Arch> {
+ public:
+  explicit PacketPlan(const Tensor<Device, dim, DType> &t)
+      :dptr_(t.dptr_), stride_(t.stride_) {}
+  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
+    return packet::Packet<DType, Arch>::Load(&dptr_[y * stride_ + x]);
+  }
+  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
+    return dptr_[y * stride_ + x];
+  }
+
+ private:
+  const DType  *dptr_;
+  index_t stride_;
+};
+
+template<typename DType, PacketArch Arch>
+class PacketPlan<ScalarExp<DType>, DType, Arch> {
+ public:
+  explicit PacketPlan(DType scalar) : scalar_(scalar) {}
+  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
+    return packet::Packet<DType, Arch>::Fill(scalar_);
+  }
+  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
+    return scalar_;
+  }
+
+ private:
+  DType scalar_;
+};
+
+template<typename OP, typename TA, typename TB, int etype, typename DType, PacketArch Arch>
+class PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch> {
+ public:
+  PacketPlan(const PacketPlan<TA, DType, Arch> &lhs, const PacketPlan<TB, DType, Arch> &rhs)
+      : lhs_(lhs), rhs_(rhs) {}
+  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
+    return packet::PacketOp<OP, DType, Arch>::Map(lhs_.EvalPacket(y, x), rhs_.EvalPacket(y, x));
+  }
+  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
+    return OP::Map(lhs_.Eval(y, x), rhs_.Eval(y, x));
+  }
+
+ private:
+  PacketPlan<TA, DType, Arch> lhs_;
+  PacketPlan<TB, DType, Arch> rhs_;
+};
+
+template<typename OP, typename TA, int etype, typename DType, PacketArch Arch>
+class PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch> {
+ public:
+  PacketPlan(const PacketPlan<TA, DType, Arch> &src) : src_(src) {}
+  MSHADOW_CINLINE packet::Packet<DType> EvalPacket(index_t y, index_t x) const {
+    return packet::PacketOp<OP, DType, Arch>::Map(src_.EvalPacket(y, x));
+  }
+  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
+    return OP::Map(src_.Eval(y, x));
+  }
+
+ private:
+  PacketPlan<TA, DType, Arch> src_;
+};
+
+template<PacketArch Arch, typename OP, typename TA, typename TB, typename DType, int etype>
+inline PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch>
+MakePacketPlan(const BinaryMapExp<OP, TA, TB, DType, etype> &e);
+
+template<PacketArch Arch, typename DType>
+inline PacketPlan<ScalarExp<DType>, DType, Arch> MakePacketPlan(const ScalarExp<DType> &e) {
+  return PacketPlan<ScalarExp<DType>, DType, Arch>(e.scalar_);
+}
+template<PacketArch Arch, typename T, typename DType>
+inline PacketPlan<T, DType, Arch> MakePacketPlan(const RValueExp<T, DType> &e) {
+  return PacketPlan<T, DType, Arch>(e.self());
+}
+template<PacketArch Arch, typename T, int dim, typename DType>
+inline PacketPlan<T, DType, Arch>
+MakePacketPlan(const MakeTensorExp<T, cpu, dim, DType> &e) {
+  return PacketPlan<T, DType, Arch>(e.real_self());
+}
+template<PacketArch Arch, typename OP, typename TA, typename DType, int etype>
+inline PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch>
+MakePacketPlan(const UnaryMapExp<OP, TA, DType, etype> &e) {
+  return PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch>(MakePacketPlan<Arch>(e.src_));
+}
+template<PacketArch Arch, typename OP, typename TA, typename TB, typename DType, int etype>
+inline PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch>
+MakePacketPlan(const BinaryMapExp<OP, TA, TB, DType, etype> &e) {
+  return PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>,
+                    DType, Arch>(MakePacketPlan<Arch>(e.lhs_), MakePacketPlan<Arch>(e.rhs_));
+}
+
+/*!
+ * \brief static check packet enable
+ *
+ * \tparam Device the type of Device
+ * \tparam dim dimension of the tensor
+ * \tparam E expression
+ */
+template<typename E, PacketArch Arch>
+struct PacketCheck{
+  static const bool kPass = false;
+};
+template<typename DType, PacketArch Arch>
+struct PacketCheck<ScalarExp<DType>, Arch> {
+  static const bool kPass = true;
+};
+template<int dim, typename DType, PacketArch Arch>
+struct PacketCheck<Tensor<cpu, dim, DType>, Arch> {
+  static const bool kPass = true;
+};
+template<typename OP, typename TA, typename DType, int etype, PacketArch Arch>
+struct PacketCheck<UnaryMapExp<OP, TA, DType, etype>, Arch> {
+  static const bool kPass = PacketCheck<TA, Arch>::kPass &&
+      packet::PacketOp<OP, DType, Arch>::kEnabled;
+};
+template<typename OP, typename TA, typename TB, typename DType, int etype, PacketArch Arch>
+struct PacketCheck< BinaryMapExp<OP, TA, TB, DType, etype>, Arch> {
+  static const bool kPass = packet::PacketOp<OP, DType, Arch>::kEnabled &&
+      PacketCheck<TA, Arch>::kPass && PacketCheck<TB, Arch>::kPass;
+};
+//----------------------------------------------------
+// Check if data is aligned and allow packet operation
+//----------------------------------------------------
+template<int dim, typename E, PacketArch Arch>
+struct PacketAlignCheck {
+  inline static bool Check(const E &exp) {
+    return false;
+  }
+};
+template<int dim, typename DType, PacketArch Arch>
+struct PacketAlignCheck<dim, ScalarExp<DType>, Arch> {
+  inline static bool Check(const ScalarExp<DType> &exp) {
+    return true;
+  }
+};
+template<int dim, typename DType, PacketArch Arch>
+struct PacketAlignCheck<dim, Tensor<cpu, dim, DType>, Arch> {
+  inline static bool Check(const Tensor<cpu, dim, DType> &t) {
+    return packet::CheckAlign<Arch>(t.dptr_) &&
+        packet::CheckAlign<Arch>(t.stride_ * sizeof(DType));
+  }
+};
+template<int dim, typename OP, typename TA, typename DType, int etype, PacketArch Arch>
+struct PacketAlignCheck<dim, UnaryMapExp<OP, TA, DType, etype>, Arch> {
+  inline static bool Check(const UnaryMapExp<OP, TA, DType, etype> &t) {
+    return PacketAlignCheck<dim, TA, Arch>::Check(t.src_);
+  }
+};
+template<int dim, typename OP, typename TA, typename TB,
+         typename DType, int etype, PacketArch Arch>
+struct PacketAlignCheck<dim, BinaryMapExp<OP, TA, TB, DType, etype>, Arch> {
+  inline static bool Check(const BinaryMapExp<OP, TA, TB, DType, etype> &t) {
+    return PacketAlignCheck<dim, TA, Arch>::Check(t.lhs_) &&
+        PacketAlignCheck<dim, TB, Arch>::Check(t.rhs_);
+  }
+};
+
+/*!
+ * \brief use PacketPlan to compute result
+ */
+template<typename SV, typename E, int dim, typename DType, PacketArch Arch>
+inline void MapPacketPlan(Tensor<cpu, dim, DType> _dst,
+                          const expr::PacketPlan<E, DType, Arch>& plan) {
+  Tensor<cpu, 2, DType> dst = _dst.FlatTo2D();
+  const index_t xlen = packet::LowerAlign<DType, Arch>(dst.size(1));
+  for (index_t y = 0; y < dst.size(0); ++y) {
+    for (index_t x = 0; x < xlen; x += packet::Packet<DType, Arch>::kSize) {
+      packet::Saver<SV, DType, Arch>::Save(&dst[y][x], plan.EvalPacket(y, x));
+    }
+    for (index_t x = xlen; x < dst.size(1); ++x) {
+      SV::Save(dst[y][x], plan.Eval(y, x));
+    }
+  }
+}
+}  // namespace expr
+}  // namespace mshadow
+#endif  // MSHADOW_PACKET_INL_H_
+//===== EXPANDED: mxnet/mshadow/mshadow/packet-inl.h =====
+
+
+namespace mshadow {
+namespace expr {
+/*!
+ * \brief Matrix multiplication.
+ * \tparam LhsExp type of lhs expression
+ * \tparam LhsExp type of rhs expression
+ * \tparam DType the type of elements
+ */
+template<typename LhsExp, typename RhsExp, typename DType>
+struct ImplicitGEMMExp:
+      public Exp<ImplicitGEMMExp<LhsExp, RhsExp, DType>,
+                 DType, type::kChainer> {
+  /*! \brief lhs operand */
+  const LhsExp &lhs_;
+  /*! \brief rhs operand */
+  const RhsExp &rhs_;
+  /*! \brief internal production size*/
+  index_t prod_size_;
+  /*! \brief the shape of this expression */
+  Shape<2> shape_;
+  /*! \brief constructor */
+  ImplicitGEMMExp(const LhsExp &lhs, const RhsExp &rhs)
+      : lhs_(lhs), rhs_(rhs) {
+    Shape<2> slhs = ShapeCheck<2, LhsExp>::Check(lhs_);
+    Shape<2> srhs = ShapeCheck<2, RhsExp>::Check(rhs_);
+    this->shape_ = mshadow::Shape2(slhs[0], srhs[1]);
+    prod_size_ = slhs[1];
+  }
+};
+
+
+template<typename LhsExp, typename RhsExp, typename DType, int e1, int e2>
+inline ImplicitGEMMExp<LhsExp, RhsExp, DType>
+implicit_dot(const Exp<LhsExp, DType, e1> &lhs,
+             const Exp<RhsExp, DType, e2> &rhs) {
+  TypeCheckPass<ExpInfo<LhsExp>::kDim == 2 && ExpInfo<RhsExp>::kDim == 2>
+      ::Error_Expression_Does_Not_Meet_Dimension_Req();
+  return ImplicitGEMMExp<LhsExp, RhsExp, DType>(lhs.self(), rhs.self());
+}
+
+//----------------------
+// Execution plan
+//----------------------
+template<typename LhsExp, typename RhsExp, typename DType>
+struct Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType> {
+ public:
+  explicit Plan(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &e)
+      : lhs_(MakePlan(e.lhs_)),
+        rhs_(MakePlan(e.rhs_)),
+        prod_size_(e.prod_size_),
+        prod_size_lower_align_(packet::LowerAlign<DType, MSHADOW_DEFAULT_PACKET>(e.prod_size_)) {
+  }
+
+  MSHADOW_XINLINE DType Eval(index_t y, index_t x) const {
+    typedef packet::Packet<DType> Packet;
+    Packet sum = Packet::Fill(0);
+
+    DType lhs_temp[Packet::kSize], rhs_temp[Packet::kSize];
+
+    for (index_t i = 0; i < prod_size_lower_align_; i += packet::Packet<DType>::kSize) {
+      // unroll
+      for (index_t j = 0; j < Packet::kSize; ++j) {
+        lhs_temp[j] = lhs_.Eval(y, i + j);
+      }
+      for (index_t j = 0; j < Packet::kSize; ++j) {
+        rhs_temp[j] = rhs_.Eval(i + j, x);
+      }
+      sum = sum + Packet::LoadUnAligned(lhs_temp) * Packet::LoadUnAligned(rhs_temp);
+    }
+    DType ret_result = sum.Sum();
+
+    for (index_t i =  prod_size_lower_align_; i < prod_size_; ++i) {
+      ret_result += lhs_.Eval(y, i) * rhs_.Eval(i, x);
+    }
+    return ret_result;
+  }
+
+ private:
+  expr::Plan<LhsExp, DType> lhs_;
+  expr::Plan<RhsExp, DType> rhs_;
+  const index_t prod_size_;
+  const index_t prod_size_lower_align_;
+};
+
+template<typename LhsExp, typename RhsExp, typename DType>
+inline Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType>
+MakePlan(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &exp) {
+  return Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType>(exp);
+}
+
+
+template<int dim, typename LhsExp, typename RhsExp, typename DType>
+struct ShapeCheck<dim, ImplicitGEMMExp<LhsExp, RhsExp, DType> > {
+  inline static Shape<dim>
+  Check(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &t) {
+    CHECK(dim == 2)
+        << "ImplicitGEMMExp only support 2 dimension";
+    Shape<dim> shape1 = ShapeCheck<dim, LhsExp>::Check(t.lhs_);
+    Shape<dim> shape2 = ShapeCheck<dim, RhsExp>::Check(t.rhs_);
+    CHECK_EQ(shape1[1], shape2[0])
+      << "implicit_dot The matrix shape do  not match";
+    return t.shape_;
+  }
+};
+
+template<typename LhsExp, typename RhsExp, typename DType>
+struct ExpInfo<ImplicitGEMMExp<LhsExp, RhsExp, DType> > {
+  static const int kDim = 2;
+  static const int kDevMask = ExpInfo<LhsExp>::kDevMask & ExpInfo<RhsExp>::kDevMask;
+};
+
+}  // namespace expr
+}  // namespace mshadow
+#endif  // MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
+
+//===== EXPANDED: mxnet/mshadow/mshadow/extension/implicit_gemm.h =====
+
+
 namespace mshadow {
 namespace expr {
 //---------------------------------------------------------------------
@@ -5743,6 +6509,17 @@ struct DotEngine<SV, xpu, 2, 2, 2, transpose_left, transpose_right, DType> {
                           const Tensor<xpu, 2, DType> &rhs,
                           DType scale) {
     Tensor<xpu, 2, DType> &dst = *p_dst;
+#if MSHADOW_STAND_ALONE
+    if (xpu::kDevMask == cpu::kDevMask && scale == 1.0f) {
+      if (!transpose_left && !transpose_right) {
+        dst = expr::implicit_dot(lhs, rhs); return;
+      } else if (!transpose_left && transpose_right) {
+        dst = expr::implicit_dot(lhs, rhs.T()); return;
+      } else if (transpose_left && !transpose_right) {
+        dst = expr::implicit_dot(lhs.T(), rhs); return;
+      }
+    }
+#endif
     // set kernel stream
     // if there is no stream, crush
     BLASEngine<xpu>::SetStream(dst.stream_);
@@ -5872,17 +6649,6 @@ struct ExpComplexEngine<SV,
 #endif  // MSHADOW_EXPR_ENGINE_INL_H_
 //===== EXPANDED: mxnet/mshadow/mshadow/expr_engine-inl.h =====
 
-//===== EXPANDIND: mxnet/mshadow/mshadow/extension.h =====
-
-/*!
- * Copyright by Contributors
- * \file extension.h
- * \brief some extension of expressions,
- *  used to support something beyond elementwise op
- * \author Tianqi Chen, Bing Xu
- */
-#ifndef MSHADOW_EXTENSION_H_
-#define MSHADOW_EXTENSION_H_
 //===== EXPANDIND: mxnet/mshadow/mshadow/extension/broadcast.h =====
 
 /*!
@@ -7590,759 +8356,6 @@ struct Plan<ConcatExp<LhsExp, RhsExp, Device, DType, srcdim, 1>, DType> {
 }   // namespace mshadow
 #endif  // MSHADOW_EXTENSION_CONCAT_H_
 //===== EXPANDED: mxnet/mshadow/mshadow/extension/concat.h =====
-
-//===== EXPANDIND: mxnet/mshadow/mshadow/extension/implicit_gemm.h =====
-
-/*!
- *  Copyright (c) 2014 by Contributors
- * \file implicit_gemm.h
- * \brief support for implicit GEMM operation
- * \author Tianqi Chen
- */
-#ifndef MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
-#define MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
-
-//===== EXPANDIND: mxnet/mshadow/mshadow/packet-inl.h =====
-
-/*!
- *  Copyright (c) 2014 by Contributors
- * \file packet-inl.h
- * \brief Generic packet vectorization code
- */
-#ifndef MSHADOW_PACKET_INL_H_
-#define MSHADOW_PACKET_INL_H_
-
-#ifdef __APPLE__
-#else
-#endif
-
-
-namespace mshadow {
-/*! \brief namespace of packet math*/
-namespace packet {
-
-enum PacketArch {
-  kPlain,
-  kSSE2,
-};
-
-#if MSHADOW_USE_SSE
-#define MSHADOW_DEFAULT_PACKET  ::mshadow::packet::kSSE2
-#else
-#define MSHADOW_DEFAULT_PACKET  ::mshadow::packet::kPlain
-#endif
-
-// whether packet operator is enabled.
-/*!
- * \brief Generic packet type
- * \tparam DType The data type of the packet.
- * \tparam Arch the Arch of the packet.
- */
-template<typename DType, PacketArch Arch = MSHADOW_DEFAULT_PACKET>
-struct Packet;
-
-template<PacketArch Arch>
-struct AlignBytes {
-  static const index_t value = 4;
-};
-
-}  // namespace packet
-}  // namespace mshadow
-
-namespace mshadow {
-namespace packet {
-/*!
- * \brief analog to cudaMallocPitch, allocate a aligned space with num_line * lspace cells
- * \param out_pitch output parameter, the actuall space allocated for each line
- * \param lspace number of cells required for each line
- * \param num_line number of lines to be allocated
- */
-inline void* AlignedMallocPitch(size_t *out_pitch,
-                                size_t lspace,
-                                size_t num_line) {
-  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
-  const index_t mask = (1 << bits) - 1;
-
-  size_t pitch = ((lspace + mask) >> bits) << bits;
-  *out_pitch = pitch;
-#ifdef _MSC_VER
-  void *res = _aligned_malloc(pitch * num_line, 1 << bits);
-#else
-  void *res;
-  int ret = posix_memalign(&res, 1 << bits, pitch * num_line);
-  CHECK_EQ(ret, 0) << "AlignedMallocPitch failed";
-#endif
-  if (res == NULL) {
-    LOG(FATAL) << "AlignedMallocPitch failed";
-  }
-  return res;
-}
-
-/*!
- * \brief free aligned space
- * \param ptr pointer to space to be freed
- */
-inline void AlignedFree(void *ptr) {
-#ifdef _MSC_VER
-  _aligned_free(ptr);
-#else
-  free(ptr);
-#endif
-}
-
-/*! \brief check if a pointer is aligned */
-template<PacketArch Arch>
-inline bool CheckAlign(size_t pitch) {
-  const index_t bits = AlignBytes<Arch>::value;
-  return !(pitch & ((1 << bits) - 1));
-}
-
-/*! \brief check if a pointer is aligned */
-template<PacketArch Arch>
-inline bool CheckAlign(void *ptr) {
-  return CheckAlign<Arch>(reinterpret_cast<size_t>(ptr));
-}
-
-/*!
- * \brief get upper bound of aligned index of size
- * \param size size of the array
- * \param fsize size of float
- */
-template<typename DType, PacketArch Arch>
-inline index_t UpperAlign(index_t size) {
-  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
-  const index_t mask = (1 << bits) - 1;
-  const index_t fsize = sizeof(DType);
-  return (((size * fsize + mask) >> bits) << bits) / fsize;
-}
-
-/*!
- * \brief get lower bound of aligned index of size
- * \param size size of the array
- * \param fsize size of float
- */
-template<typename DType, PacketArch Arch>
-inline index_t LowerAlign(index_t size) {
-  const index_t bits = AlignBytes<MSHADOW_DEFAULT_PACKET>::value;
-  const index_t fsize = sizeof(DType);
-  return (((size * fsize) >> bits) << bits) / fsize;
-}
-
-/*!
- * \brief generic Packet operator
- * \tparam OP The operator
- * \tparam DType The data type
- * \tparam Arch The architecture.
- */
-template<typename OP, typename DType, PacketArch Arch>
-struct PacketOp {
-  static const bool kEnabled = false;
-};
-// specialization of operators
-template<typename DType, PacketArch Arch>
-struct PacketOp<op::plus, DType, Arch> {
-  static const bool kEnabled = true;
-  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
-                                                   const Packet<DType, Arch>& rhs) {
-    return lhs + rhs;
-  }
-};
-template<typename DType, PacketArch Arch>
-struct PacketOp<op::minus, DType, Arch> {
-  static const bool kEnabled = true;
-  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
-                                                  const Packet<DType, Arch>& rhs) {
-    return lhs - rhs;
-  }
-};
-template<typename DType, PacketArch Arch>
-struct PacketOp<op::mul, DType, Arch> {
-  static const bool kEnabled = true;
-  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
-                                                  const Packet<DType, Arch>& rhs) {
-    return lhs * rhs;
-  }
-};
-template<typename DType, PacketArch Arch>
-struct PacketOp<op::div, DType, Arch> {
-  static const bool kEnabled = true;
-  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& lhs,
-                                                  const Packet<DType, Arch>& rhs) {
-    return lhs / rhs;
-  }
-};
-
-template<typename DType, PacketArch Arch>
-struct PacketOp<op::identity, DType, Arch> {
-  static const bool kEnabled = true;
-  MSHADOW_CINLINE static Packet<DType, Arch> Map(const Packet<DType, Arch>& src) {
-    return src;
-  }
-};
-
-
-// savers to do storage
-template<typename SV, typename TFloat, PacketArch Arch>
-struct Saver{
-  MSHADOW_CINLINE static void Save(TFloat *dst, const Packet<TFloat, Arch>& src) {
-    Packet<TFloat, Arch> lhs = Packet<TFloat, Arch>::Load(dst);
-    Packet<TFloat, Arch> ans = PacketOp<typename SV::OPType, TFloat, Arch>::Map(lhs, src);
-    ans.Store(dst);
-  }
-};
-template<typename TFloat, PacketArch Arch>
-struct Saver<sv::saveto, TFloat, Arch> {
-  MSHADOW_CINLINE static void Save(TFloat *dst, const Packet<TFloat, Arch>& src) {
-    src.Store(dst);
-  }
-};
-}  // namespace packet
-}  // namespace mshadow
-
-//===== EXPANDIND: mxnet/mshadow/mshadow/packet/plain-inl.h =====
-
-/*!
- *  Copyright (c) 2014 by Contributors
- * \file plain-inl.h
- * \brief support of plain packet that use the plain datatype.
- */
-#ifndef MSHADOW_PACKET_PLAIN_INL_H_
-#define MSHADOW_PACKET_PLAIN_INL_H_
-
-
-namespace mshadow {
-namespace packet {
-template<typename DType>
-struct Packet<DType, kPlain> {
- public:
-  /*! \brief number of float in vector */
-  static const index_t kSize = 1;
-  /*! \brief The internal data */
-  DType data_;
-  // enable default copy constructor
-  Packet(void) {}
-  // constructor from the intrinsic type
-  explicit Packet(DType data) : data_(data) {}
-  // create a fill with the target value s
-  MSHADOW_CINLINE static Packet<DType, kPlain> Fill(DType s) {
-    return Packet<DType, kPlain>(s);
-  }
-  // load from address
-  MSHADOW_CINLINE static Packet<DType, kPlain> Load(const DType* src) {
-    return Packet<DType, kPlain>(*src);
-  }
-  // load from address
-  MSHADOW_CINLINE static Packet<DType, kPlain> LoadUnAligned(const DType* src) {
-    return Packet<DType, kPlain>(*src);
-  }
-  // fill it with value s
-  MSHADOW_CINLINE Packet<DType, kPlain>& operator=(DType s) {
-    data_ = s;
-    return *this;
-  }
-  // store data into dst
-  MSHADOW_CINLINE void Store(DType* dst) const {
-    *dst = data_;
-  }
-  // get the sum of all contents
-  MSHADOW_CINLINE DType Sum() const {
-    return data_;
-  }
-};
-
-template<typename DType>
-MSHADOW_CINLINE Packet<DType, kPlain> operator+(const Packet<DType, kPlain>& lhs,
-                                                const Packet<DType, kPlain>& rhs) {
-  return Packet<DType, kPlain>(lhs.data_ + rhs.data_);
-}
-
-template<typename DType>
-MSHADOW_CINLINE Packet<DType, kPlain> operator-(const Packet<DType, kPlain>& lhs,
-                                                const Packet<DType, kPlain>& rhs) {
-  return Packet<DType, kPlain>(lhs.data_ - rhs.data_);
-}
-template<typename DType>
-MSHADOW_CINLINE Packet<DType, kPlain> operator*(const Packet<DType, kPlain>& lhs,
-                                                    const Packet<DType, kPlain>& rhs) {
-  return Packet<DType, kPlain>(lhs.data_ * rhs.data_);
-}
-
-template<typename DType>
-MSHADOW_CINLINE Packet<DType, kPlain> operator/(const Packet<DType, kPlain>& lhs,
-                                                    const Packet<DType, kPlain>& rhs) {
-  return Packet<DType, kPlain>(lhs.data_ / rhs.data_);
-}
-}  // namespace packet
-}  // namespace mshadow
-#endif  // MSHADOW_PACKET_PLAIN_INL_H_
-//===== EXPANDED: mxnet/mshadow/mshadow/packet/plain-inl.h =====
-
-#if MSHADOW_USE_SSE && !defined(__CUDACC__)
-//===== EXPANDIND: mxnet/mshadow/mshadow/packet/sse-inl.h =====
-
-/*!
- *  Copyright (c) 2014 by Contributors
- * \file sse-inl.h
- * \brief support of sse2 packet optimization of some operations
- * \author Tianqi Chen
- */
-#ifndef MSHADOW_PACKET_SSE_INL_H_
-#define MSHADOW_PACKET_SSE_INL_H_
-
-
-namespace mshadow {
-namespace packet {
-template<>
-struct Packet<float, kSSE2> {
- public:
-  /*! \brief number of float in vector */
-  static const index_t kSize = 4;
-  /*! \brief The internal data */
-  __m128 data_;
-  // enable default copy constructor
-  Packet(void) {}
-  // constructor from the intrinsic type
-  explicit Packet(__m128 data) : data_(data) {}
-  // create a fill with the target value s
-  MSHADOW_CINLINE static Packet<float, kSSE2> Fill(float s) {
-    return Packet<float, kSSE2>(_mm_set1_ps(s));
-  }
-  // load from address
-  MSHADOW_CINLINE static Packet<float, kSSE2> Load(const float* src) {
-    return Packet<float, kSSE2>(_mm_load_ps(src));
-  }
-  // load from address
-  MSHADOW_CINLINE static Packet<float, kSSE2> LoadUnAligned(const float* src) {
-    return Packet<float, kSSE2>(_mm_loadu_ps(src));
-  }
-  // fill it with value s
-  MSHADOW_CINLINE Packet<float, kSSE2>& operator=(float s) {
-    data_ = _mm_set1_ps(s);
-    return *this;
-  }
-  // store data into dst
-  MSHADOW_CINLINE void Store(float* dst) const {
-    _mm_store_ps(dst, data_);
-  }
-  // get the sum of all contents
-  MSHADOW_CINLINE float Sum() const {
-    __m128 ans  = _mm_add_ps(data_, _mm_movehl_ps(data_, data_));
-    __m128 rst  = _mm_add_ss(ans, _mm_shuffle_ps(ans, ans, 1));
-#if defined(_MSC_VER) && (_MSC_VER <= 1500) && defined(_WIN64)
-    return rst.m128_f32[0];
-#else
-    float rr = _mm_cvtss_f32(rst);
-    return rr;
-#endif
-  }
-};
-
-
-/*! \brief vector real type for float */
-template<>
-struct Packet<double, kSSE2> {
-  /*! \brief number of float in vector */
-  static const index_t kSize = 2;
-  // internal data
-  __m128d data_;
-  // constructor
-  Packet(void) {}
-  explicit Packet(__m128d data) : data_(data) {}
-  // create a fill with the target value s
-  MSHADOW_CINLINE static Packet<double, kSSE2> Fill(double s) {
-    return Packet<double, kSSE2>(_mm_set1_pd(s));
-  }
-  // load from address
-  MSHADOW_CINLINE static Packet<double, kSSE2> Load(const double* src) {
-    return Packet<double, kSSE2>(_mm_load_pd(src));
-  }
-  MSHADOW_CINLINE static Packet<double, kSSE2> LoadUnAligned(const double* src) {
-    return Packet<double, kSSE2>(_mm_loadu_pd(src));
-  }
-  // fill it with value s
-  MSHADOW_CINLINE Packet<double, kSSE2>& operator=(double s) {
-    data_ = _mm_set1_pd(s);
-    return *this;
-  }
-  // store data into dst
-  MSHADOW_CINLINE void Store(double* dst) const {
-    _mm_store_pd(dst, data_);
-  }
-  // get sum of all content
-  inline double Sum(void) const {
-    __m128d tmp =  _mm_add_sd(data_, _mm_unpackhi_pd(data_, data_));
-#if defined(_MSC_VER) && (_MSC_VER <= 1500) && defined(_WIN64)
-    return tmp.m128d_f64[0];
-#else
-    double ans = _mm_cvtsd_f64(tmp);
-    return ans;
-#endif
-  }
-};
-
-MSHADOW_CINLINE Packet<float, kSSE2> operator+(const Packet<float, kSSE2>& lhs,
-                                                    const Packet<float, kSSE2>& rhs) {
-  return Packet<float, kSSE2>(_mm_add_ps(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<double, kSSE2> operator+(const Packet<double, kSSE2>& lhs,
-                                                     const Packet<double, kSSE2>& rhs) {
-  return Packet<double, kSSE2>(_mm_add_pd(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<float, kSSE2> operator-(const Packet<float, kSSE2>& lhs,
-                                                    const Packet<float, kSSE2>& rhs) {
-  return Packet<float, kSSE2>(_mm_sub_ps(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<double, kSSE2> operator-(const Packet<double, kSSE2>& lhs,
-                                                     const Packet<double, kSSE2>& rhs) {
-  return Packet<double, kSSE2>(_mm_sub_pd(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<float, kSSE2> operator*(const Packet<float, kSSE2>& lhs,
-                                                    const Packet<float, kSSE2>& rhs) {
-  return Packet<float, kSSE2>(_mm_mul_ps(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<double, kSSE2> operator*(const Packet<double, kSSE2>& lhs,
-                                                     const Packet<double, kSSE2>& rhs) {
-  return Packet<double, kSSE2>(_mm_mul_pd(lhs.data_, rhs.data_));
-}
-
-
-MSHADOW_CINLINE Packet<float, kSSE2> operator/(const Packet<float, kSSE2>& lhs,
-                                                    const Packet<float, kSSE2>& rhs) {
-  return Packet<float, kSSE2>(_mm_div_ps(lhs.data_, rhs.data_));
-}
-
-MSHADOW_CINLINE Packet<double, kSSE2> operator/(const Packet<double, kSSE2>& lhs,
-                                                     const Packet<double, kSSE2>& rhs) {
-  return Packet<double, kSSE2>(_mm_div_pd(lhs.data_, rhs.data_));
-}
-
-}  // namespace packet
-}  // namespace mshadow
-#endif  // MSHADOW_PACKET_SSE_INL_H_
-//===== EXPANDED: mxnet/mshadow/mshadow/packet/sse-inl.h =====
-
-#endif
-
-namespace mshadow {
-namespace expr {
-
-typedef packet::PacketArch PacketArch;
-
-// same as plan, but use packet
-template<typename ExpType, typename DType, PacketArch Arch>
-class PacketPlan {
- public:
-  /*!
-   * \brief evaluate the expression at index [y][x],
-   * x will be aligned to Packet<DType, Arch>::kSize
-   */
-  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const;
-  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const;
-};
-
-template <typename Device, int dim, typename DType, PacketArch Arch>
-class PacketPlan<Tensor<Device, dim, DType>, DType, Arch> {
- public:
-  explicit PacketPlan(const Tensor<Device, dim, DType> &t)
-      :dptr_(t.dptr_), stride_(t.stride_) {}
-  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
-    return packet::Packet<DType, Arch>::Load(&dptr_[y * stride_ + x]);
-  }
-  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
-    return dptr_[y * stride_ + x];
-  }
-
- private:
-  const DType  *dptr_;
-  index_t stride_;
-};
-
-template<typename DType, PacketArch Arch>
-class PacketPlan<ScalarExp<DType>, DType, Arch> {
- public:
-  explicit PacketPlan(DType scalar) : scalar_(scalar) {}
-  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
-    return packet::Packet<DType, Arch>::Fill(scalar_);
-  }
-  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
-    return scalar_;
-  }
-
- private:
-  DType scalar_;
-};
-
-template<typename OP, typename TA, typename TB, int etype, typename DType, PacketArch Arch>
-class PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch> {
- public:
-  PacketPlan(const PacketPlan<TA, DType, Arch> &lhs, const PacketPlan<TB, DType, Arch> &rhs)
-      : lhs_(lhs), rhs_(rhs) {}
-  MSHADOW_CINLINE packet::Packet<DType, Arch> EvalPacket(index_t y, index_t x) const {
-    return packet::PacketOp<OP, DType, Arch>::Map(lhs_.EvalPacket(y, x), rhs_.EvalPacket(y, x));
-  }
-  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
-    return OP::Map(lhs_.Eval(y, x), rhs_.Eval(y, x));
-  }
-
- private:
-  PacketPlan<TA, DType, Arch> lhs_;
-  PacketPlan<TB, DType, Arch> rhs_;
-};
-
-template<typename OP, typename TA, int etype, typename DType, PacketArch Arch>
-class PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch> {
- public:
-  PacketPlan(const PacketPlan<TA, DType, Arch> &src) : src_(src) {}
-  MSHADOW_CINLINE packet::Packet<DType> EvalPacket(index_t y, index_t x) const {
-    return packet::PacketOp<OP, DType, Arch>::Map(src_.EvalPacket(y, x));
-  }
-  MSHADOW_CINLINE DType Eval(index_t y, index_t x) const {
-    return OP::Map(src_.Eval(y, x));
-  }
-
- private:
-  PacketPlan<TA, DType, Arch> src_;
-};
-
-template<PacketArch Arch, typename OP, typename TA, typename TB, typename DType, int etype>
-inline PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch>
-MakePacketPlan(const BinaryMapExp<OP, TA, TB, DType, etype> &e);
-
-template<PacketArch Arch, typename DType>
-inline PacketPlan<ScalarExp<DType>, DType, Arch> MakePacketPlan(const ScalarExp<DType> &e) {
-  return PacketPlan<ScalarExp<DType>, DType, Arch>(e.scalar_);
-}
-template<PacketArch Arch, typename T, typename DType>
-inline PacketPlan<T, DType, Arch> MakePacketPlan(const RValueExp<T, DType> &e) {
-  return PacketPlan<T, DType, Arch>(e.self());
-}
-template<PacketArch Arch, typename T, int dim, typename DType>
-inline PacketPlan<T, DType, Arch>
-MakePacketPlan(const MakeTensorExp<T, cpu, dim, DType> &e) {
-  return PacketPlan<T, DType, Arch>(e.real_self());
-}
-template<PacketArch Arch, typename OP, typename TA, typename DType, int etype>
-inline PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch>
-MakePacketPlan(const UnaryMapExp<OP, TA, DType, etype> &e) {
-  return PacketPlan<UnaryMapExp<OP, TA, DType, etype>, DType, Arch>(MakePacketPlan<Arch>(e.src_));
-}
-template<PacketArch Arch, typename OP, typename TA, typename TB, typename DType, int etype>
-inline PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>, DType, Arch>
-MakePacketPlan(const BinaryMapExp<OP, TA, TB, DType, etype> &e) {
-  return PacketPlan<BinaryMapExp<OP, TA, TB, DType, etype>,
-                    DType, Arch>(MakePacketPlan<Arch>(e.lhs_), MakePacketPlan<Arch>(e.rhs_));
-}
-
-/*!
- * \brief static check packet enable
- *
- * \tparam Device the type of Device
- * \tparam dim dimension of the tensor
- * \tparam E expression
- */
-template<typename E, PacketArch Arch>
-struct PacketCheck{
-  static const bool kPass = false;
-};
-template<typename DType, PacketArch Arch>
-struct PacketCheck<ScalarExp<DType>, Arch> {
-  static const bool kPass = true;
-};
-template<int dim, typename DType, PacketArch Arch>
-struct PacketCheck<Tensor<cpu, dim, DType>, Arch> {
-  static const bool kPass = true;
-};
-template<typename OP, typename TA, typename DType, int etype, PacketArch Arch>
-struct PacketCheck<UnaryMapExp<OP, TA, DType, etype>, Arch> {
-  static const bool kPass = PacketCheck<TA, Arch>::kPass &&
-      packet::PacketOp<OP, DType, Arch>::kEnabled;
-};
-template<typename OP, typename TA, typename TB, typename DType, int etype, PacketArch Arch>
-struct PacketCheck< BinaryMapExp<OP, TA, TB, DType, etype>, Arch> {
-  static const bool kPass = packet::PacketOp<OP, DType, Arch>::kEnabled &&
-      PacketCheck<TA, Arch>::kPass && PacketCheck<TB, Arch>::kPass;
-};
-//----------------------------------------------------
-// Check if data is aligned and allow packet operation
-//----------------------------------------------------
-template<int dim, typename E, PacketArch Arch>
-struct PacketAlignCheck {
-  inline static bool Check(const E &exp) {
-    return false;
-  }
-};
-template<int dim, typename DType, PacketArch Arch>
-struct PacketAlignCheck<dim, ScalarExp<DType>, Arch> {
-  inline static bool Check(const ScalarExp<DType> &exp) {
-    return true;
-  }
-};
-template<int dim, typename DType, PacketArch Arch>
-struct PacketAlignCheck<dim, Tensor<cpu, dim, DType>, Arch> {
-  inline static bool Check(const Tensor<cpu, dim, DType> &t) {
-    return packet::CheckAlign<Arch>(t.dptr_) &&
-        packet::CheckAlign<Arch>(t.stride_ * sizeof(DType));
-  }
-};
-template<int dim, typename OP, typename TA, typename DType, int etype, PacketArch Arch>
-struct PacketAlignCheck<dim, UnaryMapExp<OP, TA, DType, etype>, Arch> {
-  inline static bool Check(const UnaryMapExp<OP, TA, DType, etype> &t) {
-    return PacketAlignCheck<dim, TA, Arch>::Check(t.src_);
-  }
-};
-template<int dim, typename OP, typename TA, typename TB,
-         typename DType, int etype, PacketArch Arch>
-struct PacketAlignCheck<dim, BinaryMapExp<OP, TA, TB, DType, etype>, Arch> {
-  inline static bool Check(const BinaryMapExp<OP, TA, TB, DType, etype> &t) {
-    return PacketAlignCheck<dim, TA, Arch>::Check(t.lhs_) &&
-        PacketAlignCheck<dim, TB, Arch>::Check(t.rhs_);
-  }
-};
-
-/*!
- * \brief use PacketPlan to compute result
- */
-template<typename SV, typename E, int dim, typename DType, PacketArch Arch>
-inline void MapPacketPlan(Tensor<cpu, dim, DType> _dst,
-                          const expr::PacketPlan<E, DType, Arch>& plan) {
-  Tensor<cpu, 2, DType> dst = _dst.FlatTo2D();
-  const index_t xlen = packet::LowerAlign<DType, Arch>(dst.size(1));
-  for (index_t y = 0; y < dst.size(0); ++y) {
-    for (index_t x = 0; x < xlen; x += packet::Packet<DType, Arch>::kSize) {
-      packet::Saver<SV, DType, Arch>::Save(&dst[y][x], plan.EvalPacket(y, x));
-    }
-    for (index_t x = xlen; x < dst.size(1); ++x) {
-      SV::Save(dst[y][x], plan.Eval(y, x));
-    }
-  }
-}
-}  // namespace expr
-}  // namespace mshadow
-#endif  // MSHADOW_PACKET_INL_H_
-//===== EXPANDED: mxnet/mshadow/mshadow/packet-inl.h =====
-
-
-namespace mshadow {
-namespace expr {
-/*!
- * \brief Matrix multiplication.
- * \tparam LhsExp type of lhs expression
- * \tparam LhsExp type of rhs expression
- * \tparam DType the type of elements
- */
-template<typename LhsExp, typename RhsExp, typename DType>
-struct ImplicitGEMMExp:
-      public Exp<ImplicitGEMMExp<LhsExp, RhsExp, DType>,
-                 DType, type::kChainer> {
-  /*! \brief lhs operand */
-  const LhsExp &lhs_;
-  /*! \brief rhs operand */
-  const RhsExp &rhs_;
-  /*! \brief internal production size*/
-  index_t prod_size_;
-  /*! \brief the shape of this expression */
-  Shape<2> shape_;
-  /*! \brief constructor */
-  ImplicitGEMMExp(const LhsExp &lhs, const RhsExp &rhs)
-      : lhs_(lhs), rhs_(rhs) {
-    Shape<2> slhs = ShapeCheck<2, LhsExp>::Check(lhs_);
-    Shape<2> srhs = ShapeCheck<2, RhsExp>::Check(rhs_);
-    this->shape_ = mshadow::Shape2(slhs[0], srhs[1]);
-    prod_size_ = slhs[1];
-  }
-};
-
-
-template<typename LhsExp, typename RhsExp, typename DType, int e1, int e2>
-inline ImplicitGEMMExp<LhsExp, RhsExp, DType>
-implicit_dot(const Exp<LhsExp, DType, e1> &lhs,
-             const Exp<RhsExp, DType, e2> &rhs) {
-  TypeCheckPass<ExpInfo<LhsExp>::kDim == 2 && ExpInfo<RhsExp>::kDim == 2>
-      ::Error_Expression_Does_Not_Meet_Dimension_Req();
-  return ImplicitGEMMExp<LhsExp, RhsExp, DType>(lhs.self(), rhs.self());
-}
-
-//----------------------
-// Execution plan
-//----------------------
-template<typename LhsExp, typename RhsExp, typename DType>
-struct Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType> {
- public:
-  explicit Plan(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &e)
-      : lhs_(MakePlan(e.lhs_)),
-        rhs_(MakePlan(e.rhs_)),
-        prod_size_(e.prod_size_),
-        prod_size_lower_align_(packet::LowerAlign<DType, MSHADOW_DEFAULT_PACKET>(e.prod_size_)) {
-  }
-
-  MSHADOW_XINLINE DType Eval(index_t y, index_t x) const {
-    typedef packet::Packet<DType> Packet;
-    Packet sum = Packet::Fill(0);
-
-    DType lhs_temp[Packet::kSize], rhs_temp[Packet::kSize];
-
-    for (index_t i = 0; i < prod_size_lower_align_; i += packet::Packet<DType>::kSize) {
-      // unroll
-      for (index_t j = 0; j < Packet::kSize; ++j) {
-        lhs_temp[j] = lhs_.Eval(y, i + j);
-      }
-      for (index_t j = 0; j < Packet::kSize; ++j) {
-        rhs_temp[j] = rhs_.Eval(i + j, x);
-      }
-      sum = sum + Packet::LoadUnAligned(lhs_temp) * Packet::LoadUnAligned(rhs_temp);
-    }
-    DType ret_result = sum.Sum();
-
-    for (index_t i =  prod_size_lower_align_; i < prod_size_; ++i) {
-      ret_result += lhs_.Eval(y, i) * rhs_.Eval(i, x);
-    }
-    return ret_result;
-  }
-
- private:
-  expr::Plan<LhsExp, DType> lhs_;
-  expr::Plan<RhsExp, DType> rhs_;
-  const index_t prod_size_;
-  const index_t prod_size_lower_align_;
-};
-
-template<typename LhsExp, typename RhsExp, typename DType>
-inline Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType>
-MakePlan(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &exp) {
-  return Plan<ImplicitGEMMExp<LhsExp, RhsExp, DType>, DType>(exp);
-}
-
-
-template<int dim, typename LhsExp, typename RhsExp, typename DType>
-struct ShapeCheck<dim, ImplicitGEMMExp<LhsExp, RhsExp, DType> > {
-  inline static Shape<dim>
-  Check(const ImplicitGEMMExp<LhsExp, RhsExp, DType> &t) {
-    CHECK(dim == 2)
-        << "ImplicitGEMMExp only support 2 dimension";
-    Shape<dim> shape1 = ShapeCheck<dim, LhsExp>::Check(t.lhs_);
-    Shape<dim> shape2 = ShapeCheck<dim, RhsExp>::Check(t.rhs_);
-    CHECK_EQ(shape1[1], shape2[0])
-      << "implicit_dot The matrix shape do  not match";
-    return t.shape_;
-  }
-};
-
-template<typename LhsExp, typename RhsExp, typename DType>
-struct ExpInfo<ImplicitGEMMExp<LhsExp, RhsExp, DType> > {
-  static const int kDim = 2;
-  static const int kDevMask = ExpInfo<LhsExp>::kDevMask & ExpInfo<RhsExp>::kDevMask;
-};
-
-}  // namespace expr
-}  // namespace mshadow
-#endif  // MSHADOW_EXTENSION_IMPLICIT_GEMM_H_
-
-//===== EXPANDED: mxnet/mshadow/mshadow/extension/implicit_gemm.h =====
 
 //===== EXPANDIND: mxnet/mshadow/mshadow/extension/choose.h =====
 
@@ -13788,6 +13801,7 @@ void NDArray::SyncCopyToCPU(real_t *data, size_t size) const {
   }
 }
 
+#if MXNET_PREDICT_ONLY == 0
 // register API function
 // those with underscore will be registered at NDArray
 MXNET_REGISTER_NDARRAY_FUN(_set_value).set_function(SetValueOp);
@@ -13853,6 +13867,7 @@ MXNET_REGISTER_NDARRAY_FUN(clip)
 .add_argument("src", "NDArray", "Source input")
 .add_argument("a_min", "real_t", "Minimum value")
 .add_argument("a_max", "real_t", "Maximum value");
+#endif
 }  // namespace mxnet
 //===== EXPANDED: mxnet/src/ndarray/ndarray.cc =====
 
@@ -21368,7 +21383,7 @@ class ActivationProp : public OperatorProperty {
     return {{in_data[activation::kData], out_data[activation::kOut]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   ActivationParam param_;
@@ -21691,7 +21706,7 @@ class BatchNormProp : public OperatorProperty {
     return {"moving_mean", "moving_var"};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   BatchNormParam param_;
@@ -21833,7 +21848,7 @@ class BlockGradientProp : public OperatorProperty {
     return {{in_data[blockgrad::kData], out_data[blockgrad::kOut]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 };  // class BlockGradientProperty
 
 #endif  // DMLC_USE_CXX11
@@ -22130,7 +22145,7 @@ class ConcatProp : public OperatorProperty {
     return out_grad;
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   ConcatParam param_;
@@ -22519,7 +22534,7 @@ class ConvolutionProp : public OperatorProperty {
     return {ResourceRequest::kTempSpace};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   ConvolutionParam param_;
@@ -22724,7 +22739,7 @@ class DropoutProp : public OperatorProperty {
     return {"output", "mask"};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   DropoutParam param_;
@@ -23069,7 +23084,7 @@ enum ElementWiseSumOpOutputs {kOut};
 struct ElementWiseSumParam : public dmlc::Parameter<ElementWiseSumParam> {
   int num_args;
   DMLC_DECLARE_PARAMETER(ElementWiseSumParam) {
-    DMLC_DECLARE_FIELD(num_args).set_range(1, 100)
+    DMLC_DECLARE_FIELD(num_args).set_lower_bound(1)
     .describe("Number of inputs to be sumed.");
   }
 };
@@ -23234,7 +23249,7 @@ class ElementWiseSumProp : public OperatorProperty {
     return {{in_data[0], out_data[0]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   ElementWiseSumParam param_;
@@ -23467,7 +23482,7 @@ class FullyConnectedProp : public OperatorProperty {
     return {{in_data[fullc::kData], in_grad[fullc::kData]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   FullyConnectedParam param_;
@@ -23633,7 +23648,6 @@ class LeakyReLUOp : public Operator {
                         const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    // TODO(bing): double check
     size_t expected = param_.act_type == leakyrelu::kPReLU ? 2 : 1;
     CHECK_EQ(out_grad.size(), 1);
     CHECK_EQ(req.size(), expected);
@@ -23646,9 +23660,9 @@ class LeakyReLUOp : public Operator {
     Tensor<xpu, 4> mask;
     Tensor<xpu, 1> weight;
     Tensor<xpu, 1> grad_weight;
-    if (in_data[leakyrelu::kData].ndim() == 2) {
-      Shape<4> dshape = Shape4(in_data[leakyrelu::kData].shape_[0],
-                               in_data[leakyrelu::kData].shape_[1], 1, 1);
+    if (out_grad[leakyrelu::kOut].ndim() == 2) {
+      Shape<4> dshape = Shape4(out_grad[leakyrelu::kOut].shape_[0],
+                               out_grad[leakyrelu::kOut].shape_[1], 1, 1);
       grad = out_grad[leakyrelu::kOut].get_with_shape<xpu, 4, real_t>(dshape, s);
       gdata = in_grad[leakyrelu::kData].get_with_shape<xpu, 4, real_t>(dshape, s);
       output = out_data[leakyrelu::kOut].get_with_shape<xpu, 4, real_t>(dshape, s);
@@ -23803,8 +23817,8 @@ class LeakyReLUProp : public OperatorProperty {
     return 1;
   }
 
-  virtual std::vector<ResourceRequest> ForwardResource(
-      const std::vector<TShape> &in_shape) const {
+  std::vector<ResourceRequest> ForwardResource(
+      const std::vector<TShape> &in_shape) const override {
     if (param_.act_type == leakyrelu::kRReLU) {
       return {ResourceRequest::kRandom};
     } else {
@@ -23812,7 +23826,7 @@ class LeakyReLUProp : public OperatorProperty {
     }
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   LeakyReLUParam param_;
@@ -24032,7 +24046,7 @@ class LocalResponseNormProp : public OperatorProperty {
 #endif
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   LRNParam param_;
@@ -24287,7 +24301,7 @@ class PoolingProp : public OperatorProperty {
 #endif
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   PoolingParam param_;
@@ -24395,10 +24409,13 @@ class RegressionOutputOp : public Operator {
     CHECK_GE(in_grad.size(), 1);
     CHECK_GE(req.size(), 1);
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 1> label = in_data[reg_enum::kLabel].get<xpu, 1, real_t>(s);
+    real_t num_output =
+      in_data[reg_enum::kLabel].Size()/in_data[reg_enum::kLabel].shape_[0];
     Tensor<xpu, 2> out = out_data[reg_enum::kOut].FlatTo2D<xpu, real_t>(s);
     Tensor<xpu, 2> grad = in_grad[reg_enum::kData].FlatTo2D<xpu, real_t>(s);
-    Assign(grad, req[reg_enum::kData], F<BackwardOp>(out, reshape(label, grad.shape_)));
+    Tensor<xpu, 2> label = in_data[reg_enum::kLabel]
+      .get_with_shape<xpu, 2, real_t>(out.shape_, s);
+    Assign(grad, req[reg_enum::kData], F<BackwardOp>(out, label)/num_output);
   }
 };
 
@@ -24428,8 +24445,15 @@ class RegressionOutputProp : public OperatorProperty {
     CHECK_EQ(in_shape->size(), 2) << "Input:[data, label]";
     const TShape &dshape = in_shape->at(0);
     if (dshape.ndim() == 0) return false;
-    CHECK_EQ(dshape[1], 1) << TypeString() << " requires input's num_hidden=1.";
-    SHAPE_ASSIGN_CHECK(*in_shape, 1, Shape1(dshape[0]));
+    auto &lshape = (*in_shape)[1];
+    if (lshape.ndim() == 0) {
+      lshape = dshape;
+    } else if (lshape[0] != dshape[0] || lshape.Size() != dshape.Size()) {
+      std::ostringstream os;
+      os << "Shape inconsistent, Provided " <<  '='<< lshape << ','
+         << " inferred shape=" << dshape;
+      throw ::mxnet::op::InferShapeError(os.str(), 1);
+    }
     out_shape->clear();
     out_shape->push_back(dshape);
     return true;
@@ -24468,7 +24492,7 @@ class RegressionOutputProp : public OperatorProperty {
     return {{in_data[reg_enum::kData], out_data[reg_enum::kOut]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 };
 #endif  // DMLC_USE_CXX11
 }  // namespace op
@@ -24662,7 +24686,7 @@ class ReshapeProp : public OperatorProperty {
     return {{out_grad[reshape_enum::kOut], in_grad[reshape_enum::kData]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  protected:
   ReshapeParam param_;
@@ -24908,7 +24932,7 @@ class SliceChannelProp : public OperatorProperty {
     return out_grad;
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   SliceChannelParam param_;
@@ -25120,7 +25144,7 @@ class SoftmaxOutputProp : public OperatorProperty {
     return {{in_data[softmaxout_enum::kData], out_data[softmaxout_enum::kOut]}};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  protected:
   SoftmaxOutputParam param_;
@@ -25128,9 +25152,13 @@ class SoftmaxOutputProp : public OperatorProperty {
 
 class DeprecatedSoftmaxProp : public SoftmaxOutputProp {
  public:
-  std::string TypeString() const override {
+  void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
     LOG(INFO) << "Softmax symbol is renamed to SoftmaxOutput. "
       << "This API will be deprecated in Dec, 2015";
+    SoftmaxOutputProp::param_.Init(kwargs);
+  }
+
+  std::string TypeString() const override {
     return "Softmax";
   }
 };
@@ -25487,8 +25515,6 @@ class DeconvolutionProp : public OperatorProperty {
         << "incorrect kernel size: " << param_.kernel;
     CHECK_GE(param_.stride.Size(), 0) \
         << "incorrect stride size: " << param_.stride;
-    CHECK(ksize_x <= dshape[3] && ksize_y <= dshape[2])
-        << "kernel size exceed input";
     (*out_shape)[deconv::kOut][1] = param_.num_filter;
     (*out_shape)[deconv::kOut][2] = param_.stride[0] * (dshape[2] - 1) +
         ksize_y - 2 * param_.pad[0];
@@ -25524,7 +25550,7 @@ class DeconvolutionProp : public OperatorProperty {
     return {ResourceRequest::kTempSpace};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   DeconvolutionParam param_;
@@ -25634,11 +25660,17 @@ typedef void *RecordIOHandle;
 
 MXNET_EXTERN_C {
 struct NativeOpInfo {
-  void (*forward)(int, float**, int*, unsigned**, int*);
-  void (*backward)(int, float**, int*, unsigned**, int*);
-  void (*infer_shape)(int, int*, unsigned**);
-  void (*list_outputs)(char***);
-  void (*list_arguments)(char***);
+  void (*forward)(int, float**, int*, unsigned**, int*, void*);
+  void (*backward)(int, float**, int*, unsigned**, int*, void*);
+  void (*infer_shape)(int, int*, unsigned**, void*);
+  void (*list_outputs)(char***, void*);
+  void (*list_arguments)(char***, void*);
+  // all functions also pass a payload void* pointer
+  void* p_forward;
+  void* p_backward;
+  void* p_infer_shape;
+  void* p_list_outputs;
+  void* p_list_arguments;
 };
 }
 /*!
@@ -26569,7 +26601,8 @@ class NativeOp : public Operator {
     SyncVec(in_data, "in_data", s, 0);
     SyncVec(out_data, "out_data", s, 1);
     s->Wait();
-    param_.pinfo->forward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(), tags.data());
+    param_.pinfo->forward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(),
+        tags.data(), param_.pinfo->p_forward);
     for (index_t i = 0; i < out_data.size(); ++i) {
       CHECK_NE(req[i], kAddTo) << "NativeOp doesn't support AddTo for output";
       if (req[i] != kNullOp) {
@@ -26602,7 +26635,8 @@ class NativeOp : public Operator {
       SyncVec(out_grad, "out_grad", s, 3);
     }
     s->Wait();
-    param_.pinfo->backward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(), tags.data());
+    param_.pinfo->backward(ptrs.size(), ptrs.data(), ndims.data(), shapes.data(),
+        tags.data(), param_.pinfo->p_backward);
     for (index_t i = 0; i < in_grad.size(); ++i) {
       CHECK_NE(req[i], kAddTo) << "NativeOp doesn't support AddTo for output";
       if (req[i] != kNullOp) {
@@ -26668,7 +26702,7 @@ class NativeOpProp : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
     char ** args = NULL;
-    param_.pinfo->list_arguments(&args);
+    param_.pinfo->list_arguments(&args, param_.pinfo->p_list_arguments);
     std::vector<std::string> ret;
     for (int i = 0; args[i] != NULL; ++i) {
       ret.push_back(args[i]);
@@ -26678,7 +26712,7 @@ class NativeOpProp : public OperatorProperty {
 
   std::vector<std::string> ListOutputs() const override {
     char ** args = NULL;
-    param_.pinfo->list_outputs(&args);
+    param_.pinfo->list_outputs(&args, param_.pinfo->p_list_outputs);
     std::vector<std::string> ret;
     for (int i = 0; args[i] != NULL; ++i) {
       ret.push_back(args[i]);
@@ -26717,12 +26751,14 @@ class NativeOpProp : public OperatorProperty {
     }
     shapes.resize(param_.num_inputs_+param_.num_outputs_);
     ndims.resize(param_.num_inputs_+param_.num_outputs_);
-    param_.pinfo->infer_shape(shapes.size(), ndims.data(), shapes.data());
+    param_.pinfo->infer_shape(shapes.size(), ndims.data(), shapes.data(),
+          param_.pinfo->p_infer_shape);
     for (unsigned i = 0; i < in_shape->size(); ++i) {
-      (*in_shape)[i] = TShape(shapes[i], shapes[i]+ndims[i]);
+      SHAPE_ASSIGN_CHECK(*in_shape, i, TShape(shapes[i], shapes[i]+ndims[i]));
     }
-    for (unsigned i = param_.num_inputs_; i < param_.num_inputs_ + out_shape->size(); ++i) {
-      (*out_shape)[i-param_.num_inputs_] = TShape(shapes[i], shapes[i]+ndims[i]);
+    out_shape->clear();
+    for (unsigned i = param_.num_inputs_; i < shapes.size(); ++i) {
+      out_shape->push_back(TShape(shapes[i], shapes[i]+ndims[i]));
     }
     return true;
   }
@@ -26758,7 +26794,7 @@ class NativeOpProp : public OperatorProperty {
     return {};
   }
 
-  Operator* CreateOperator(Context ctx) const;
+  Operator* CreateOperator(Context ctx) const override;
 
  private:
   NativeOpParam param_;
@@ -27509,7 +27545,7 @@ class TBlobUnaryOpProp : public OperatorProperty {
     }
   }
 
-  Operator* CreateOperator(Context ctx) const {
+  Operator* CreateOperator(Context ctx) const override {
     size_t dev_mask = ctx.dev_mask();
     TBlobUnaryOperator *op = new TBlobUnaryOperator();
     CHECK(dev_mask < source->funary_.size() && source->funary_[dev_mask] != nullptr);
@@ -29294,6 +29330,8 @@ void MXAPISetLastError(const char* msg) {
 
 #ifdef __cplusplus
 #define MXNET_EXTERN_C extern "C"
+#else
+#define MXNET_EXTERN_C
 #endif
 
 #ifdef _WIN32
